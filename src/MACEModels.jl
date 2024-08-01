@@ -1,3 +1,4 @@
+__precompile__()
 module MACEModels
 
 """
@@ -41,11 +42,11 @@ This is used to speed up concurrent energy and force evaluations, as well as to 
 Use e.g. `get_energy_mean(MACEModel.last_eval_cache)` to access results of the last prediction made by the model.
 """
 mutable struct MACEPredictionCache{T}
-    energies::Vector{Vector{T}}
-    node_energy::Vector{Matrix{T}}
-    forces::Vector{<:AbstractArray{T,3}}
-    stress::Vector{<:AbstractArray{T,3}}
-    input_structures::Vector
+    energies::AbstractVector{AbstractVector{T}}
+    node_energy::AbstractVector{AbstractMatrix{T}}
+    forces::AbstractVector{<:AbstractArray{T,3}}
+    stress::AbstractVector{<:AbstractArray{T,3}}
+    input_structures::AbstractVector
 end
 
 """
