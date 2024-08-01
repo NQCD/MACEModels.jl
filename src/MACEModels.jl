@@ -555,6 +555,6 @@ function NQCModels.derivative!(model::MACEModel, atoms::Atoms, D::AbstractArray{
     end
 end
 
-export predict, predict!, get_energy_mean, get_energy_variance, get_energy_ensemble, get_forces_mean, get_forces_variance, get_forces_ensemble, MACEModel, MACEPredictionCache
+export MACEModel, MACEPredictionCache
 
 end
