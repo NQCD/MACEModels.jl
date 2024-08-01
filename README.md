@@ -6,4 +6,4 @@ This package provides an interface between NQCModels.jl and the MACE code, allow
 
 **The current version of this package uses MACE v0.3.3 to evaluate models. Any models trained on later versions may lead to unexpected or incorrect results.**
 
-
+Currently, only the evaluation of forces and energies is supported. Models that yield additional information might cause errors. 
