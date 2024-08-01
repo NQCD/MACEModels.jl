@@ -1,10 +1,20 @@
-name = "MACEModel"
+name = "MACEModels"
 uuid = "29bafc4c-4f38-420f-a153-8a5a5e0bd5f6"
 authors = ["Alexander Spears <alexander.spears@warwick.ac.uk> and contributors"]
-version = "1.0.0-DEV"
+version = "1.0.0"
+
+[deps]
+CondaPkg = "992eb4ea-22a4-4c89-a5bb-47a3300528ab"
+DLPack = "53c2dc0f-f7d5-43fd-8906-6c0220547083"
+NQCBase = "78c76ebc-5665-4934-b512-82d81b5cbfb7"
+NQCModels = "c814dc9f-a51f-4eaf-877f-82eda4edad48"
+PythonCall = "6099a3de-0909-46bc-b1f4-468b9a2dfc0d"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
+UnitfulAtomic = "a7773ee8-282e-5fa2-be4e-bd808c38a91a"
 
 [compat]
-julia = "1.6.7"
+julia = "1.9"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
