@@ -42,8 +42,8 @@ This is used to speed up concurrent energy and force evaluations, as well as to 
 Use e.g. `get_energy_mean(MACEModel.last_eval_cache)` to access results of the last prediction made by the model.
 """
 mutable struct MACEPredictionCache{T}
-    energies::AbstractVector{AbstractVector{T}}
-    node_energy::AbstractVector{AbstractMatrix{T}}
+    energies::AbstractVector{<:AbstractVector{T}}
+    node_energy::AbstractVector{<:AbstractMatrix{T}}
     forces::AbstractVector{<:AbstractArray{T,3}}
     stress::AbstractVector{<:AbstractArray{T,3}}
     input_structures::AbstractVector
@@ -192,10 +192,10 @@ function MACEModel(
 
     # Initialise an evaluation cache
     starter_mace_cache = MACEPredictionCache(
-        [[convert(default_dtype,1.0)]], # Energies
-        [hcat(convert(default_dtype,1.0))], # Node energies
-        [[convert(default_dtype,1.0);;;]], # Forces
-        [[convert(default_dtype,1.0);;;]], # Stresses
+        [[convert(default_dtype, 1.0)]], # Energies
+        [hcat(convert(default_dtype, 1.0))], # Node energies
+        [[convert(default_dtype, 1.0);;;]], # Forces
+        [[convert(default_dtype, 1.0);;;]], # Stresses
         [], # Input structures
     )
 
