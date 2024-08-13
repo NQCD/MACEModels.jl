@@ -171,7 +171,7 @@ function SciMLBase.solve_batch(prob, alg, ensemblealg::CustomSplitDistributed, I
 end
 
 function start(config::MultiProcessConfig)
-    channel_split = collect(Iterators.partition(config.runners, Int(ceil(length(config.runners) ÷ length(config.evaluators))))) # Split into roughly equal parts
+    channel_split = collect(Iterators.partition(collect(1:length(config.runners)), Int(ceil(length(config.runners) ÷ length(config.evaluators))))) # Split into roughly equal parts
     for (idx,pid) in enumerate(config.evaluators)
         remote_do(config.model_listener, pid, config.model_loader_function, config.input_channels[channel_split[idx]], config.output_channels[channel_split[idx]])
         @debug "Evaluator dispatched on process $pid, listening on channels $(channel_split[idx])"
