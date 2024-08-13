@@ -25,7 +25,7 @@ struct CustomSplitDistributed<:SciMLBase.BasicEnsembleAlgorithm
 end
 
 """
-    MultiProcessConfig(runners, evaluators, model_load_function::Function, model_listener::Function, positions_prototype)
+    MultiProcessConfig(runners, evaluators, model_load_function::Function, positions_prototype; model_listener::Function=batch_evaluation_loop)
 
 Configuration for distributed execution dynamics propagation and model evaluation. 
 
@@ -36,7 +36,7 @@ Configuration for distributed execution dynamics propagation and model evaluatio
 - `model_listener::Function`: Function that listens for structures on the input channels and outputs the results on the output channels. Default is `batch_evaluation_loop`. `(model, input_channels, output_channels)->()`
 - `positions_prototype`: Sample atomic positions to determine system size. 
 """
-function MultiProcessConfig(runners, evaluators, model_load_function::Function, model_listener::Function=batch_evaluation_loop, positions_prototype)
+function MultiProcessConfig(runners, evaluators, model_load_function::Function, positions_prototype; model_listener::Function=batch_evaluation_loop)
     input_channels = [RemoteChannel(()->Channel{typeof(positions_prototype)}(1)) for _ in runners]
     output_channels = [RemoteChannel(()->Channel{EnergyForcesCache{eltype(positions_prototype), typeof(positions_prototype)}}(1)) for _ in runners]
     return MultiProcessConfig(runners, evaluators, model_load_function, model_listener, input_channels, output_channels)
@@ -68,7 +68,7 @@ function mace_batch_predict(model::MACEModel, structures)
 end
 
 """
-    batch_evaluation_loop(model<:Model, user_model_function::Function, input_channels::Vector{RemoteChannel}, output_channels::Vector{RemoteChannel}; max_delay = 1000)
+    batch_evaluation_loop(model<:Model, input_channels::Vector{RemoteChannel}, output_channels::Vector{RemoteChannel}; user_model_function::Function=mace_batch_predict, max_delay = 1000)
 
 **This doesn't know how to use your model most efficiently, it only handles I/O between processes!**
 
@@ -88,10 +88,12 @@ The results are then put back into the correct output channels.
 
 # Arguments
 - `model::Model`: The model that will be used for evaluation.
+- `input_channels::Vector{RemoteChannel}`: The input channels that will be used to receive structures.
+- `output_channels::Vector{RemoteChannel}`: The output channels that will be used to send the results.
 - `user_model_function::Function`: The user-defined function that will be used to evaluate the model.
 
 """
-function batch_evaluation_loop(model<:Model, user_model_function::Function=mace_batch_predict, input_channels::Vector{RemoteChannel}, output_channels::Vector{RemoteChannel}; max_delay = 1000)
+function batch_evaluation_loop(model::NQCModels.Model, input_channels::Vector{RemoteChannel}, output_channels::Vector{RemoteChannel}; user_model_function::Function=mace_batch_predict, max_delay = 1000)
     i = 1 # Start polling for input every 1ms, then increase delay for every unsuccessfull poll
     while true
         sleep(1e-3 * i)

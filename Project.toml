@@ -6,6 +6,7 @@ version = "1.1.0"
 [deps]
 CondaPkg = "992eb4ea-22a4-4c89-a5bb-47a3300528ab"
 DLPack = "53c2dc0f-f7d5-43fd-8906-6c0220547083"
+Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"
 NQCBase = "78c76ebc-5665-4934-b512-82d81b5cbfb7"
 NQCModels = "c814dc9f-a51f-4eaf-877f-82eda4edad48"
 PythonCall = "6099a3de-0909-46bc-b1f4-468b9a2dfc0d"
