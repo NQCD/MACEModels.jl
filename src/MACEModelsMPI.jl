@@ -8,7 +8,7 @@ import SciMLBase
 struct MultiProcessConfig
     runners::Vector{Int} # NQCDynamics workers
     evaluators::Vector{Int} # MACE inference worker
-    remote_model::NQCModels.Model # Model to be evaluated
+    model_loader_function::Function
     model_listener::Function
     input_channels::Vector{RemoteChannel}
     output_channels::Vector{RemoteChannel}
@@ -95,7 +95,8 @@ The results are then put back into the correct output channels.
 - `user_model_function::Function`: The user-defined function that will be used to evaluate the model.
 
 """
-function batch_evaluation_loop(model::NQCModels.Model, input_channels::Vector{RemoteChannel}, output_channels::Vector{RemoteChannel}; user_model_function::Function=mace_batch_predict, max_delay = 1000)
+function batch_evaluation_loop(model_loader::Function, input_channels::Vector{RemoteChannel}, output_channels::Vector{RemoteChannel}; user_model_function::Function=mace_batch_predict, max_delay = 1000)
+    model = model_loader()
     i = 1 # Start polling for input every 1ms, then increase delay for every unsuccessfull poll
     while true
         sleep(1e-3 * i)
@@ -130,15 +131,13 @@ end
     RemoteModel(config::MultiProcessConfig, structure_prototype)
 
 Creates a RemoteModel that can be used to evaluate structures on a remote process.
-
-**The remote model must already be loaded, since model DoFs and mobile atoms are cached process-locally.**
 """
 function RemoteModel(config::MultiProcessConfig, structure_prototype)
     RemoteModel(
         config,
         EnergyForcesCache(zero(eltype(structure_prototype)), zeros(eltype(structure_prototype), size(structure_prototype))),
-        remotecall_fetch(() -> NQCModels.ndofs(config.remote_model), first(config.evaluators)),
-        remotecall_fetch(() -> NQCModels.mobileatoms(config.remote_model, size(structure_prototype, 2)), first(config.evaluators))
+        remotecall_fetch(() -> NQCModels.ndofs(config.model_loader_function()), first(config.evaluators)),
+        remotecall_fetch(() -> NQCModels.mobileatoms(config.model_loader_function(), size(structure_prototype, 2)), first(config.evaluators))
     )
 end
 
@@ -173,9 +172,10 @@ function SciMLBase.solve_batch(prob, alg, ensemblealg::CustomSplitDistributed, I
 end
 
 function start(config::MultiProcessConfig)
-    for pid in config.evaluators
-        remote_do(config.model_listener, pid, config.remote_model, config.input_channels, config.output_channels)
-        @debug "Evaluator dispatched on process $pid"
+    channel_split = collect(Iterators.partition(config.runners, Int(ceil(length(config.runners) ÷ length(config.evaluators))))) # Split into roughly equal parts
+    for (idx,pid) in enumerate(config.evaluators)
+        remote_do(config.model_listener, pid, config.model_loader_function, config.input_channels[channel_split[idx]], config.output_channels[channel_split[idx]])
+        @debug "Evaluator dispatched on process $pid, listening on channels $(channel_split[idx])"
     end
 end
 
