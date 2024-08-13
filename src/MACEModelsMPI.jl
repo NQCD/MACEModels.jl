@@ -40,8 +40,7 @@ Configuration for distributed execution dynamics propagation and model evaluatio
 function MultiProcessConfig(runners, evaluators, model_load_function::Function, positions_prototype; model_listener::Function=batch_evaluation_loop)
     input_channels = [RemoteChannel(()->Channel{typeof(positions_prototype)}(1)) for _ in runners]
     output_channels = [RemoteChannel(()->Channel{EnergyForcesCache{eltype(positions_prototype), typeof(positions_prototype)}}(1)) for _ in runners]
-    model = remotecall_fetch(model_load_function, first(evaluators))
-    return MultiProcessConfig(runners, evaluators, model, model_listener, input_channels, output_channels)
+    return MultiProcessConfig(runners, evaluators, model_load_function, model_listener, input_channels, output_channels)
 end
 
 """
