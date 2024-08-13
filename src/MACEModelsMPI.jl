@@ -60,7 +60,7 @@ mutable struct RemoteModel <: NQCModels.AdiabaticModels.AdiabaticModel
 end
 
 
-function mace_batch_predict(model::MACEModel, structures)
+function mace_batch_predict(model::MACEModels.MACEModel, structures)
     @debug "Predicting batch of $(length(structures)) structures on process $(myid())"
     MACEModels.predict!(model, model.atoms, structures, model.cell)
     energies = MACEModels.get_energy_mean(model.last_eval_cache)
