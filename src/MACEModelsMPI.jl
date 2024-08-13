@@ -1,5 +1,6 @@
 module Ensemble
 
+using MACEModels
 using Distributed
 using NQCModels
 import SciMLBase
