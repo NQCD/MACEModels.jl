@@ -8,7 +8,7 @@ import SciMLBase
 struct MultiProcessConfig
     runners::Vector{Int} # NQCDynamics workers
     evaluators::Vector{Int} # MACE inference worker
-    remote_model::Model # Model to be evaluated
+    remote_model::NQCMOdels.Model # Model to be evaluated
     model_listener::Function
     input_channels::Vector{RemoteChannel}
     output_channels::Vector{RemoteChannel}
