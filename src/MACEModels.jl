@@ -558,6 +558,8 @@ function NQCModels.derivative!(model::MACEModel, atoms::Atoms, D::AbstractArray{
     end
 end
 
-export MACEModel, MACEPredictionCache
+include("MACEModelsMPI.jl")
+
+export MACEModel, MACEPredictionCache, Ensemble
 
 end
