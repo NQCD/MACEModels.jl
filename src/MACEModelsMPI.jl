@@ -8,7 +8,7 @@ import SciMLBase
 struct MultiProcessConfig
     runners::Vector{Int} # NQCDynamics workers
     evaluators::Vector{Int} # MACE inference worker
-    model_load_function::Function
+    remote_model::Model # Model to be evaluated
     model_listener::Function
     input_channels::Vector{RemoteChannel}
     output_channels::Vector{RemoteChannel}
@@ -40,7 +40,8 @@ Configuration for distributed execution dynamics propagation and model evaluatio
 function MultiProcessConfig(runners, evaluators, model_load_function::Function, positions_prototype; model_listener::Function=batch_evaluation_loop)
     input_channels = [RemoteChannel(()->Channel{typeof(positions_prototype)}(1)) for _ in runners]
     output_channels = [RemoteChannel(()->Channel{EnergyForcesCache{eltype(positions_prototype), typeof(positions_prototype)}}(1)) for _ in runners]
-    return MultiProcessConfig(runners, evaluators, model_load_function, model_listener, input_channels, output_channels)
+    model = remotecall_fetch(model_load_function, first(evaluators))
+    return MultiProcessConfig(runners, evaluators, model, model_listener, input_channels, output_channels)
 end
 
 """
@@ -136,8 +137,8 @@ function RemoteModel(config::MultiProcessConfig, structure_prototype)
     RemoteModel(
         config,
         EnergyForcesCache(zero(eltype(structure_prototype)), zeros(eltype(structure_prototype), size(structure_prototype))),
-        remotecall_fetch(() -> NQCModels.ndofs(remote_mace_model), config.evaluators[1]),
-        remotecall_fetch(() -> NQCModels.mobileatoms(remote_mace_model, size(structure_prototype, 2)), config.evaluators[1])
+        remotecall_fetch(() -> NQCModels.ndofs(config.remote_model), first(config.evaluators)),
+        remotecall_fetch(() -> NQCModels.mobileatoms(config.remote_model, size(structure_prototype, 2)), first(config.evaluators))
     )
 end
 
@@ -173,7 +174,7 @@ end
 
 function start(config::MultiProcessConfig)
     for pid in config.evaluators
-        remote_do(config.model_listener, pid, config.model_load_function(), config.input_channels, config.output_channels)
+        remote_do(config.model_listener, pid, config.remote_model, config.input_channels, config.output_channels)
         @debug "Evaluator dispatched on process $pid"
     end
 end
