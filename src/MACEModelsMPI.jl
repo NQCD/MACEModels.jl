@@ -1,5 +1,6 @@
 module Ensemble
 
+using NQCModels: mobileatoms
 using MACEModels
 using Distributed
 using NQCModels
@@ -12,8 +13,8 @@ struct MultiProcessConfig
     model_listener::Function # Function to listen for structures and output results
     input_channels::Vector{RemoteChannel} # Input structures from runners --> evaluators
     output_channels::Vector{RemoteChannel} # Energies and forces from evaluators --> runners
-    model_ndofs::RemoteChannel # Caching NQCModels.ndofs for runners
-    model_mobileatoms::RemoteChannel # Caching NQCModels.mobileatoms for runners
+    model_ndofs::Int # Caching NQCModels.ndofs for runners
+    model_mobileatoms::Vector{Int} # Caching NQCModels.mobileatoms for runners
 end
 
 """
@@ -43,6 +44,8 @@ function MultiProcessConfig(runners, evaluators, model_load_function::Function, 
     input_channels = [RemoteChannel(() -> Channel{typeof(positions_prototype)}(1)) for _ in runners]
     output_channels = [RemoteChannel(() -> Channel{EnergyForcesCache{eltype(positions_prototype),typeof(positions_prototype)}}(1)) for _ in runners]
     model_ref = remotecall(model_load_function, evaluators[1])
+    ndofs = remotecall_fetch((x) -> NQCModels.ndofs(fetch(x)), evaluators[1], model_ref)
+    mobileatoms = remotecall_fetch((x, y) -> NQCModels.mobileatoms(fetch(x), y), evaluators[1], model_ref, size(positions_prototype, 2))
     return MultiProcessConfig(
         runners,
         evaluators,
@@ -50,8 +53,8 @@ function MultiProcessConfig(runners, evaluators, model_load_function::Function, 
         model_listener,
         input_channels,
         output_channels,
-        remotecall_fetch((x) -> NQCModels.ndofs(fetch(x)), evaluators[1], model_ref),
-        remotecall_fetch((x, y) -> NQCModels.mobileatoms(fetch(x), y), evaluators[1], model_ref, size(positions_prototype, 2)),
+        ndofs,
+        mobileatoms,
     )
 end
 
