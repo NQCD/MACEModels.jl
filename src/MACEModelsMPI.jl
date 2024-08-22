@@ -182,7 +182,7 @@ function SciMLBase.solve_batch(prob, alg, ensemblealg::CustomSplitDistributed, I
     kwargs...)
     runner_pool = CachingPool(ensemblealg.config.runners)
 
-    batch_data = pmap(runner_pool, II, batch_size=pmap_batch_size, ensemblealg.pmap_args...) do i
+    batch_data = pmap(runner_pool, II; batch_size=pmap_batch_size, ensemblealg.pmap_args...) do i
         SciMLBase.batch_func(i, prob, alg; kwargs...)
     end
 
