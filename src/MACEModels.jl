@@ -85,7 +85,7 @@ end
 
 NQCModels.ndofs(model::MACEModel) = 3
 NQCModels.dofs(model::MACEModel) = Base.OneTo(3)
-mobileatoms(model::MACEModel, n::Int) = model.mobile_atoms # Return all mobile atoms in the system.
+NQCModels.mobileatoms(model::MACEModel, n::Int) = model.mobile_atoms # Return all mobile atoms in the system.
 
 # ToDo: Nice constructor for MACEModel and simpler input for single model.
 
