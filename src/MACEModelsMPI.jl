@@ -43,9 +43,7 @@ Configuration for distributed execution dynamics propagation and model evaluatio
 function MultiProcessConfig(runners, evaluators, model_load_function::Function, positions_prototype; model_listener::Function=batch_evaluation_loop)
     input_channels = [RemoteChannel(() -> Channel{typeof(positions_prototype)}(1)) for _ in runners]
     output_channels = [RemoteChannel(() -> Channel{EnergyForcesCache{eltype(positions_prototype),typeof(positions_prototype)}}(1)) for _ in runners]
-    model_ref = remotecall(model_load_function, evaluators[1])
-    ndofs = remotecall_fetch((x) -> NQCModels.ndofs(fetch(x)), evaluators[1], model_ref)
-    mobileatoms = remotecall_fetch((x, y) -> NQCModels.mobileatoms(fetch(x), y), evaluators[1], model_ref, size(positions_prototype, 2))
+    ndofs, mobileatoms = remotecall_fetch((x, y) -> (NQCModels.ndofs(x()), NQCModels.mobileatoms(x(), y)), evaluators[1], model_load_function, size(positions_prototype, 2))
     return MultiProcessConfig(
         runners,
         evaluators,
