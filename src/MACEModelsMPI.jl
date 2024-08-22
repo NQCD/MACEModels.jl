@@ -156,17 +156,23 @@ end
 NQCModels.dofs(model::RemoteModel) = 1:model.dofs
 NQCModels.ndofs(model::RemoteModel) = model.dofs
 
-function NQCModels.potential(model::RemoteModel, R::Matrix{Float64})
+function NQCModels.potential(model::RemoteModel, R::AbstractMatrix)
     @debug "Evaluating potential on process $(myid())"
-    put!(model.config.input_channels[findfirst(model.config.runners .== myid())], R)
+    put!(
+        model.config.input_channels[findfirst(model.config.runners .== myid())],
+        convert(eltype(first(model.config.input_channels)), R) # Ensure type conversion to expected channel type
+    )
     wait(model.config.output_channels[findfirst(model.config.runners .== myid())])
     model.mace_cache = take!(model.config.output_channels[findfirst(model.config.runners .== myid())])
     return model.mace_cache.energy
 end
 
-function NQCModels.derivative!(model::RemoteModel, D::Matrix{Float64}, R::Matrix{Float64})
+function NQCModels.derivative!(model::RemoteModel, D::AbstractMatrix, R::AbstractMatrix)
     @debug "Evaluating derivative on process $(myid())"
-    put!(model.config.input_channels[findfirst(model.config.runners .== myid())], R)
+    put!(
+        model.config.input_channels[findfirst(model.config.runners .== myid())],
+        convert(eltype(first(model.config.input_channels)), R) # Ensure type conversion to expected channel type
+    )
     wait(model.config.output_channels[findfirst(model.config.runners .== myid())])
     model.mace_cache = take!(model.config.output_channels[findfirst(model.config.runners .== myid())])
     D .-= model.mace_cache.forces
