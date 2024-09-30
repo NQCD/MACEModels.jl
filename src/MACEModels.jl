@@ -183,7 +183,8 @@ function MACEModel(
     cutoff_radius = convert(default_dtype, unique(cutoff_radii)[1])
 
     # Build z-table
-    z_table = mace_tools[].utils.AtomicNumberTable(sort(unique(atoms.numbers)))
+    # Hardcoding this to the model so we can handle input structures using a subset of all learned atom types.
+    z_table = mace_tools[].utils.AtomicNumberTable(Vector(from_dlpack(models[1].atomic_numbers)))
 
     # Freeze parameters
     for model in models
