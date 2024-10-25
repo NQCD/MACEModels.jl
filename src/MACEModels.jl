@@ -303,7 +303,6 @@ function predict!(
             config = mace_configuration_from_nqcd_configuration(atoms[i], cell[i], R[i]; dtype=mace_interface.default_dtype)
             dataset[i] = mace_data[].AtomicData.from_config(config, mace_interface.z_table, mace_interface.cutoff_radius)
             @debug "Encoding structure $(i)/$(length(R))\n"
-            @debug @showR[i] mace_configuration = config mace_AtomicData = dataset[i]
         end
         # Initialise DataLoader
         batch_size = mace_interface.batch_size === nothing ? length(dataset) : mace_interface.batch_size # Ensure there is a batch size
