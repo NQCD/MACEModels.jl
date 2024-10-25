@@ -237,10 +237,10 @@ function mace_configuration_from_nqcd_configuration(
         cell_array = zeros(dtype, size(R, 1), size(R, 1))
     elseif isa(cell, PeriodicCell)
         pbc = cell.periodicity
-        cell_array = Matrix{eltype(R)}(ustrip.(auconvert.(u"Å", cell.vectors))')
+        cell_array = permutedims(Matrix{eltype(R)}(ustrip.(auconvert.(u"Å", cell.vectors))), (2, 1))
     end
 
-    ase_positions = ustrip.(auconvert.(u"Å", R))'
+    ase_positions = permutedims(ustrip.(auconvert.(u"Å", R)), (2, 1))
 
     config = mace_data[].utils.Configuration(
         atomic_numbers=PyList(atoms.numbers), # needs to be a list
@@ -324,15 +324,16 @@ function predict!(
             evalcache_index = (batch_index - 1) * batch_size # Pointer to the start of the batch in the output arrays
             for (model_index, model) in enumerate(mace_interface.models)
                 # Place copy of batch on model device
-                clone = batch.clone().to(mace_interface.device[model_index])
+                clone = Py(batch.clone().to(mace_interface.device[model_index]).to_dict())
                 # Evaluate model
-                model_output = model(clone.to_dict(), compute_stress=true)
+                model_output = Py(model(clone, compute_stress=true))
+                @show model_output
                 # Split according to batching
                 @debug "Model $(model_index) output:" output = model_output
                 #! Check how well this performs and whether this actually saves memory
                 energies = Array(from_dlpack(model_output["energy"].contiguous().detach()))
                 forces = Array(from_dlpack(model_output["forces"].contiguous().detach()))
-                splitting = Array(from_dlpack(clone.ptr.contiguous())) .+ 1 # Array of batch item bounds in output arrays, +1 due to Julia-Python conversion
+                splitting = Array(from_dlpack(clone.ptr.contiguous().detach())) .+ 1 # Array of batch item bounds in output arrays, +1 due to Julia-Python conversion
                 for structure_index in 2:length(splitting)
                     mace_interface.last_eval_cache.energies[evalcache_index+structure_index-1][model_index] = energies[structure_index-1]
                     mace_interface.last_eval_cache.forces[evalcache_index+structure_index-1][:, :, model_index] .= forces[:, splitting[structure_index-1]:splitting[structure_index]-1] # last index -1 because Julia includes last index in a slice
