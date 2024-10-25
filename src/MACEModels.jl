@@ -324,9 +324,9 @@ function predict!(
             evalcache_index = (batch_index - 1) * batch_size # Pointer to the start of the batch in the output arrays
             for (model_index, model) in enumerate(mace_interface.models)
                 # Place copy of batch on model device
-                clone = Py(batch.clone().to(mace_interface.device[model_index]).to_dict())
+                clone = batch.clone().to(mace_interface.device[model_index])
                 # Evaluate model
-                model_output = Py(model(clone, compute_stress=true))
+                model_output = Py(model(clone.to_dict(), compute_stress=true))
                 @show model_output
                 # Split according to batching
                 @debug "Model $(model_index) output:" output = model_output
