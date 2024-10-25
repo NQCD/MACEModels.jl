@@ -166,7 +166,7 @@ function MACEModel(
             model = torch[].load(f=file_path, map_location=device[i])
             model = model.to(device[i])
             # Check if any rogue atoms contained in base structure
-            any(sort(unique(atoms.numbers)) ∉ Vector(from_dlpack(model.atomic_numbers))) || throw(ArgumentError("Example structure contains atom types not present in MACE model $(i)."))
+            any(sort(unique(atoms.numbers)) ∉ Vector(from_dlpack(model.atomic_numbers.contiguous()))) || throw(ArgumentError("Example structure contains atom types not present in MACE model $(i)."))
             # Model is safe to add to ensemble
             push!(models, model)
         catch e
@@ -184,7 +184,7 @@ function MACEModel(
 
     # Build z-table
     # Hardcoding this to the model so we can handle input structures using a subset of all learned atom types.
-    z_table = mace_tools[].utils.AtomicNumberTable(Vector(from_dlpack(models[1].atomic_numbers)))
+    z_table = mace_tools[].utils.AtomicNumberTable(Vector(from_dlpack(models[1].atomic_numbers.contiguous())))
 
     # Freeze parameters
     for model in models
@@ -302,7 +302,8 @@ function predict!(
         for i in eachindex(R)
             config = mace_configuration_from_nqcd_configuration(atoms[i], cell[i], R[i]; dtype=mace_interface.default_dtype)
             dataset[i] = mace_data[].AtomicData.from_config(config, mace_interface.z_table, mace_interface.cutoff_radius)
-            @debug "Encoding structure $(i)/$(length(R))\n" structure_data = R[i] mace_configuration = config mace_AtomicData=dataset[i]
+            @debug "Encoding structure $(i)/$(length(R))\n" 
+            @debug @showR[i] mace_configuration = config mace_AtomicData=dataset[i]
         end
         # Initialise DataLoader
         batch_size = mace_interface.batch_size === nothing ? length(dataset) : mace_interface.batch_size # Ensure there is a batch size
@@ -330,9 +331,9 @@ function predict!(
                 # Split according to batching
                 @debug "Model $(model_index) output:" output = model_output
                 #! Check how well this performs and whether this actually saves memory
-                energies = Array(from_dlpack(model_output["energy"].detach()))
-                forces = Array(from_dlpack(model_output["forces"].detach()))
-                splitting = Array(from_dlpack(clone.ptr)) .+ 1 # Array of batch item bounds in output arrays, +1 due to Julia-Python conversion
+                energies = Array(from_dlpack(model_output["energy"].contiguous().detach()))
+                forces = Array(from_dlpack(model_output["forces"].contiguous().detach()))
+                splitting = Array(from_dlpack(clone.ptr.contiguous()) .+ 1 # Array of batch item bounds in output arrays, +1 due to Julia-Python conversion
                 for structure_index in 2:length(splitting)
                     mace_interface.last_eval_cache.energies[evalcache_index+structure_index-1][model_index] = energies[structure_index-1]
                     mace_interface.last_eval_cache.forces[evalcache_index+structure_index-1][:, :, model_index] .= forces[:, splitting[structure_index-1]:splitting[structure_index]-1] # last index -1 because Julia includes last index in a slice
@@ -442,7 +443,7 @@ function get_forces_mean(mace_cache::MACEPredictionCache)
     for index in eachindex(mace_cache.forces)
         mean_forces[index] = dropdims(mean(austrip.(mace_cache.forces[index] .* u"eV/Å"); dims=3); dims=3) # Force is given in eV/Å
         if sum(abs.(mean_forces[index]))≥0.1
-            @debug "Large forces detected in structure $(index)." forces = mean_forces[index] input_structures = mace_cache.input_structures
+            @debug "Large forces detected in structure $(index)." forces = mean_forces[index] input_structures = mace_cache.input_structures[index]
         end
     end
     if length(mean_forces) == 1
