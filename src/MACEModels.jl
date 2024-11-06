@@ -142,7 +142,7 @@ function MACEModel(
                 if pyconvert(Int, torch[].cuda.device_count()) < parse(Int, split(dev, ":")[2])
                     throw(ArgumentError("CUDA device index out of range."))
                 end
-                torch[].cuda.set_device(split(dev, ":")[2])
+                torch[].cuda.set_device(dev)
             end
         elseif dev == "mps"
             if pyconvert(Bool, torch[].backends.mps.is_built())
