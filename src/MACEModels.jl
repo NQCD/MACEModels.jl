@@ -134,6 +134,7 @@ function MACEModel(
         if split(dev, ":")[1] == "cuda"
             if pyconvert(Bool, torch[].backends.cuda.is_built())
                 @debug "CUDA device available, using GPU."
+                torch[].cuda.init() # Maybe this will help weirdness for selecting second GPU
             else
                 @warn "CUDA device not available, falling back to CPU."
                 dev = "cpu"
@@ -334,8 +335,6 @@ function predict!(
                 forces = Array(from_dlpack(model_output["forces"].contiguous().detach()))
                 splitting = Array(from_dlpack(clone.ptr.contiguous().detach())) .+ 1 # Array of batch item bounds in output arrays, +1 due to Julia-Python conversion
                 for structure_index in 2:length(splitting)
-                    @debug "Writing indices\nBatch: $(batch_index)\nCache Pointer: $(evalcache_index)\nStructure index: $(structure_index)\nCalculated index: $(evalcache_index+structure_index-1)"
-                    @debug "Reading indices\nLower: $(splitting[structure_index-1])\nUpper: $(splitting[structure_index]-1)"
                     mace_interface.last_eval_cache.energies[evalcache_index+structure_index-1][model_index] = energies[structure_index-1]
                     mace_interface.last_eval_cache.forces[evalcache_index+structure_index-1][:, :, model_index] .= forces[:, splitting[structure_index-1]:splitting[structure_index]-1] # last index -1 because Julia includes last index in a slice
                 end
@@ -438,6 +437,7 @@ end
 
 Returns the mean forces of the structures stored in the evaluation cache.
 Forces are returned in units of **Hartree/Bohr**.
+Warning: This function does not respect mobileatoms constraints. Forces for frozen atoms must be manually set to 0
 """
 function get_forces_mean(mace_cache::MACEPredictionCache)
     mean_forces = Vector{Matrix{eltype(mace_cache.forces[1])}}(undef, length(mace_cache.forces))
@@ -459,6 +459,7 @@ end
 
 Returns the force variance of the structures stored in the evaluation cache.
 Forces are returned in units of **Hartree²/Bohr²**.
+Warning: This function does not respect mobileatoms constraints. Forces for frozen atoms must be manually set to 0
 """
 function get_forces_variance(mace_cache::MACEPredictionCache)
     mean_forces = Vector{Matrix{eltype(mace_cache.forces[1])}}(undef, length(mace_cache.forces))
@@ -476,6 +477,8 @@ end
     get_forces_ensemble(mace_cache::MACEPredictionCache)
 
 Returns the forces evaluated by each model in the ensemble in units of **Hartree/Bohr**.
+
+Warning: This function does not respect mobileatoms constraints. Forces for frozen atoms must be manually set to 0
 """
 function get_forces_ensemble(mace_cache::MACEPredictionCache)
     ensemble_forces = Vector{typeof(mace_cache.forces[1])}(undef, length(mace_cache.forces))
