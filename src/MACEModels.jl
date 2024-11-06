@@ -334,8 +334,8 @@ function predict!(
                 forces = Array(from_dlpack(model_output["forces"].contiguous().detach()))
                 splitting = Array(from_dlpack(clone.ptr.contiguous().detach())) .+ 1 # Array of batch item bounds in output arrays, +1 due to Julia-Python conversion
                 for structure_index in 2:length(splitting)
-                    @debug "Writing indices" batch = batch_index cache_pointer = evalcache_index structure = structure_index calc_index = evalcache_index+structure_index-1
-                    @debug "Reading indices" lower_bound = splitting[structure_index-1] upper_bound = splitting[structure_index]-1]
+                    @debug "Writing indices\nBatch: $(batch_index)\nCache Pointer: $(evalcache_index)\nStructure index: $(structure_index)\nCalculated index: $(evalcache_index+structure_index-1)"
+                    @debug "Reading indices\nLower: $(splitting[structure_index-1])\nUpper: $(splitting[structure_index]-1)"
                     mace_interface.last_eval_cache.energies[evalcache_index+structure_index-1][model_index] = energies[structure_index-1]
                     mace_interface.last_eval_cache.forces[evalcache_index+structure_index-1][:, :, model_index] .= forces[:, splitting[structure_index-1]:splitting[structure_index]-1] # last index -1 because Julia includes last index in a slice
                 end
