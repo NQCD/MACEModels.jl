@@ -134,7 +134,6 @@ function MACEModel(
         if split(dev, ":")[1] == "cuda"
             if pyconvert(Bool, torch[].backends.cuda.is_built())
                 @debug "CUDA device available, using GPU."
-                torch[].cuda.init() # Maybe this will help weirdness for selecting second GPU
             else
                 @warn "CUDA device not available, falling back to CPU."
                 dev = "cpu"
@@ -143,6 +142,7 @@ function MACEModel(
                 if pyconvert(Int, torch[].cuda.device_count()) < parse(Int, split(dev, ":")[2])
                     throw(ArgumentError("CUDA device index out of range."))
                 end
+                torch[].cuda.set_device(split(dev, ":")[2])
             end
         elseif dev == "mps"
             if pyconvert(Bool, torch[].backends.mps.is_built())
