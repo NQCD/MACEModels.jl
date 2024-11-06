@@ -139,10 +139,8 @@ function MACEModel(
                 dev = "cpu"
             end
             if length(split(dev, ":")) == 2
-                if pyconvert(Int, torch[].cuda.device_count()) < parse(Int, split(dev, ":")[2])
-                    throw(ArgumentError("CUDA device index out of range."))
-                end
-                torch[].cuda.set_device(dev)
+                @warn "Running on a selected GPU is currently unsupported. Falling back to cuda:0. See https://github.com/NQCD/MACEModels.jl/issues/13 for more information"
+                dev = "cuda:0"
             end
         elseif dev == "mps"
             if pyconvert(Bool, torch[].backends.mps.is_built())
