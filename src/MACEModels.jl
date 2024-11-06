@@ -229,9 +229,12 @@ function mace_configuration_from_nqcd_configuration(
     R::AbstractMatrix;
     dtype::Type=Float64,
 )
+    #=
     if eltype(R) != dtype
         R = convert(Matrix{dtype}, R)
     end
+    =#
+    #! Removed positions type conversion to check if it affects prediction
     if isa(cell, InfiniteCell)
         pbc = zeros(Bool, size(R, 1))
         cell_array = zeros(dtype, size(R, 1), size(R, 1))
@@ -331,6 +334,8 @@ function predict!(
                 forces = Array(from_dlpack(model_output["forces"].contiguous().detach()))
                 splitting = Array(from_dlpack(clone.ptr.contiguous().detach())) .+ 1 # Array of batch item bounds in output arrays, +1 due to Julia-Python conversion
                 for structure_index in 2:length(splitting)
+                    @debug "Writing indices" batch = batch_index cache_pointer = evalcache_index structure = structure_index calc_index = evalcache_index+structure_index-1
+                    @debug "Reading indices" lower_bound = splitting[structure_index-1] upper_bound = splitting[structure_index]-1]
                     mace_interface.last_eval_cache.energies[evalcache_index+structure_index-1][model_index] = energies[structure_index-1]
                     mace_interface.last_eval_cache.forces[evalcache_index+structure_index-1][:, :, model_index] .= forces[:, splitting[structure_index-1]:splitting[structure_index]-1] # last index -1 because Julia includes last index in a slice
                 end
@@ -504,7 +509,7 @@ function NQCModels.derivative(model::MACEModel, atoms::Atoms, R::AbstractMatrix,
     D = zeros(eltype(R), size(R))
     predict!(model, atoms, [R], cell)
     # Return derivative (mean is trivial)
-    @views D[:, model.mobile_atoms] .= -get_forces_mean(model.last_eval_cache)[:, model.mobile_atoms]
+    D[:, model.mobile_atoms] .-= @views get_forces_mean(model.last_eval_cache)[:, model.mobile_atoms]
     return D
 end
 
@@ -512,7 +517,7 @@ function NQCModels.derivative!(model::MACEModel, D::AbstractMatrix, atoms::Atoms
     # Evaluate model
     predict!(model, atoms, [R], cell)
     # Return derivative
-    @views D[:, model.mobile_atoms] .-= get_forces_mean(model.last_eval_cache)[:, model.mobile_atoms]
+    D[:, model.mobile_atoms] .-= @views get_forces_mean(model.last_eval_cache)[:, model.mobile_atoms]
 end
 
 # ToDo: Potential and derivative for multiple structures
@@ -542,7 +547,7 @@ function NQCModels.derivative(model::MACEModel, atoms::Atoms, R::Vector{<:Abstra
     # Return derivative (mean is trivial)
     D_full = get_forces_mean(model.last_eval_cache)
     for i in axes(D, 3)
-        @views D[i][:, model.mobile_atoms] .= -D_full[i][:, model.mobile_atoms]
+        D[i][:, model.mobile_atoms] .-= @views D_full[i][:, model.mobile_atoms]
     end
     return D
 end
@@ -558,7 +563,7 @@ function NQCModels.derivative!(model::MACEModel, atoms::Atoms, D::AbstractArray{
     predict!(model, atoms, R, cell)
     # Return derivative (mean is trivial)
     for i in axes(D, 3)
-        @views D[:, model.mobile_atoms, i] .-= get_forces_mean(model.last_eval_cache)[i][:, model.mobile_atoms]
+        D[:, model.mobile_atoms, i] .-= @views get_forces_mean(model.last_eval_cache)[i][:, model.mobile_atoms]
     end
 end
 
