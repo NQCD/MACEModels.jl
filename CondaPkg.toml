@@ -1,3 +1,5 @@
+channels= ["conda-forge", "pytorch"]
+
 [deps]
 prettytable = ""
 matplotlib = ""
@@ -7,15 +9,9 @@ pandas = ""
 e3nn = ""
 numpy = "<2.0"
 scipy = ""
-
-[deps.torchaudio]
-channel = "pytorch"
-
-[deps.torchvision]
-channel = "pytorch"
-
-[deps.pytorch]
-channel = "pytorch"
+torchaudio = ""
+torchvision = ""
+pytorch = ""
 
 [pip.deps]
 mace-torch = "@git+https://github.com/ACEsuit/mace.git@v0.3.3"
