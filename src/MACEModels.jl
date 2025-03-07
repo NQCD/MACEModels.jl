@@ -139,9 +139,8 @@ function MACEModel(
                 dev = "cpu"
             end
             if length(split(dev, ":")) == 2
-                if pyconvert(Int, torch[].cuda.device_count()) < parse(Int, split(dev, ":")[2])
-                    throw(ArgumentError("CUDA device index out of range."))
-                end
+                @warn "Running on a selected GPU is currently unsupported. Falling back to cuda:0. See https://github.com/NQCD/MACEModels.jl/issues/13 for more information"
+                dev = "cuda:0"
             end
         elseif dev == "mps"
             if pyconvert(Bool, torch[].backends.mps.is_built())
@@ -166,7 +165,7 @@ function MACEModel(
             model = torch[].load(f=file_path, map_location=device[i])
             model = model.to(device[i])
             # Check if any rogue atoms contained in base structure
-            any(sort(unique(atoms.numbers)) ∉ Vector(from_dlpack(model.atomic_numbers))) || throw(ArgumentError("Example structure contains atom types not present in MACE model $(i)."))
+            any(sort(unique(atoms.numbers)) ∉ Vector(from_dlpack(model.atomic_numbers.contiguous()))) || throw(ArgumentError("Example structure contains atom types not present in MACE model $(i)."))
             # Model is safe to add to ensemble
             push!(models, model)
         catch e
@@ -183,7 +182,8 @@ function MACEModel(
     cutoff_radius = convert(default_dtype, unique(cutoff_radii)[1])
 
     # Build z-table
-    z_table = mace_tools[].utils.AtomicNumberTable(sort(unique(atoms.numbers)))
+    # Hardcoding this to the model so we can handle input structures using a subset of all learned atom types.
+    z_table = mace_tools[].utils.AtomicNumberTable(Vector(from_dlpack(models[1].atomic_numbers.contiguous())))
 
     # Freeze parameters
     for model in models
@@ -228,18 +228,21 @@ function mace_configuration_from_nqcd_configuration(
     R::AbstractMatrix;
     dtype::Type=Float64,
 )
+    #=
     if eltype(R) != dtype
         R = convert(Matrix{dtype}, R)
     end
+    =#
+    #! Removed positions type conversion to check if it affects prediction
     if isa(cell, InfiniteCell)
         pbc = zeros(Bool, size(R, 1))
         cell_array = zeros(dtype, size(R, 1), size(R, 1))
     elseif isa(cell, PeriodicCell)
         pbc = cell.periodicity
-        cell_array = Matrix{eltype(R)}(@. ustrip(auconvert(u"Å", cell.vectors')))
+        cell_array = permutedims(Matrix{eltype(R)}(ustrip.(auconvert.(u"Å", cell.vectors))), (2, 1))
     end
 
-    ase_positions = @. ustrip(auconvert(u"Å", R'))
+    ase_positions = permutedims(ustrip.(auconvert.(u"Å", R)), (2, 1))
 
     config = mace_data[].utils.Configuration(
         atomic_numbers=PyList(atoms.numbers), # needs to be a list
@@ -323,12 +326,12 @@ function predict!(
                 # Place copy of batch on model device
                 clone = batch.clone().to(mace_interface.device[model_index])
                 # Evaluate model
-                model_output = model(clone.to_dict(), compute_stress=true)
+                model_output = Py(model(clone.to_dict(), compute_stress=true))
                 # Split according to batching
                 #! Check how well this performs and whether this actually saves memory
-                energies = Array(from_dlpack(model_output["energy"].detach()))
-                forces = Array(from_dlpack(model_output["forces"].detach()))
-                splitting = Array(from_dlpack(clone.ptr)) .+ 1 # Array of batch item bounds in output arrays, +1 due to Julia-Python conversion
+                energies = Array(from_dlpack(model_output["energy"].contiguous().detach()))
+                forces = Array(from_dlpack(model_output["forces"].contiguous().detach()))
+                splitting = Array(from_dlpack(clone.ptr.contiguous().detach())) .+ 1 # Array of batch item bounds in output arrays, +1 due to Julia-Python conversion
                 for structure_index in 2:length(splitting)
                     mace_interface.last_eval_cache.energies[evalcache_index+structure_index-1][model_index] = energies[structure_index-1]
                     mace_interface.last_eval_cache.forces[evalcache_index+structure_index-1][:, :, model_index] .= forces[:, splitting[structure_index-1]:splitting[structure_index]-1] # last index -1 because Julia includes last index in a slice
@@ -432,11 +435,15 @@ end
 
 Returns the mean forces of the structures stored in the evaluation cache.
 Forces are returned in units of **Hartree/Bohr**.
+Warning: This function does not respect mobileatoms constraints. Forces for frozen atoms must be manually set to 0
 """
 function get_forces_mean(mace_cache::MACEPredictionCache)
     mean_forces = Vector{Matrix{eltype(mace_cache.forces[1])}}(undef, length(mace_cache.forces))
     for index in eachindex(mace_cache.forces)
         mean_forces[index] = dropdims(mean(austrip.(mace_cache.forces[index] .* u"eV/Å"); dims=3); dims=3) # Force is given in eV/Å
+        if sum(abs.(mean_forces[index])) ≥ 0.1
+            @debug "Large forces detected in structure $(index)." forces = mean_forces[index] input_structures = mace_cache.input_structures[index]
+        end
     end
     if length(mean_forces) == 1
         return mean_forces[1]
@@ -450,6 +457,7 @@ end
 
 Returns the force variance of the structures stored in the evaluation cache.
 Forces are returned in units of **Hartree²/Bohr²**.
+Warning: This function does not respect mobileatoms constraints. Forces for frozen atoms must be manually set to 0
 """
 function get_forces_variance(mace_cache::MACEPredictionCache)
     mean_forces = Vector{Matrix{eltype(mace_cache.forces[1])}}(undef, length(mace_cache.forces))
@@ -467,6 +475,8 @@ end
     get_forces_ensemble(mace_cache::MACEPredictionCache)
 
 Returns the forces evaluated by each model in the ensemble in units of **Hartree/Bohr**.
+
+Warning: This function does not respect mobileatoms constraints. Forces for frozen atoms must be manually set to 0
 """
 function get_forces_ensemble(mace_cache::MACEPredictionCache)
     ensemble_forces = Vector{typeof(mace_cache.forces[1])}(undef, length(mace_cache.forces))
@@ -500,7 +510,7 @@ function NQCModels.derivative(model::MACEModel, atoms::Atoms, R::AbstractMatrix,
     D = zeros(eltype(R), size(R))
     predict!(model, atoms, [R], cell)
     # Return derivative (mean is trivial)
-    @views D[:, model.mobile_atoms] .= -get_forces_mean(model.last_eval_cache)[:, model.mobile_atoms]
+    D[:, model.mobile_atoms] .-= @views get_forces_mean(model.last_eval_cache)[:, model.mobile_atoms]
     return D
 end
 
@@ -508,7 +518,7 @@ function NQCModels.derivative!(model::MACEModel, D::AbstractMatrix, atoms::Atoms
     # Evaluate model
     predict!(model, atoms, [R], cell)
     # Return derivative
-    @views D[:, model.mobile_atoms] .-= get_forces_mean(model.last_eval_cache)[:, model.mobile_atoms]
+    D[:, model.mobile_atoms] .-= @views get_forces_mean(model.last_eval_cache)[:, model.mobile_atoms]
 end
 
 # ToDo: Potential and derivative for multiple structures
@@ -538,7 +548,7 @@ function NQCModels.derivative(model::MACEModel, atoms::Atoms, R::Vector{<:Abstra
     # Return derivative (mean is trivial)
     D_full = get_forces_mean(model.last_eval_cache)
     for i in axes(D, 3)
-        @views D[i][:, model.mobile_atoms] .= -D_full[i][:, model.mobile_atoms]
+        D[i][:, model.mobile_atoms] .-= @views D_full[i][:, model.mobile_atoms]
     end
     return D
 end
@@ -554,7 +564,7 @@ function NQCModels.derivative!(model::MACEModel, atoms::Atoms, D::AbstractArray{
     predict!(model, atoms, R, cell)
     # Return derivative (mean is trivial)
     for i in axes(D, 3)
-        @views D[:, model.mobile_atoms, i] .-= get_forces_mean(model.last_eval_cache)[i][:, model.mobile_atoms]
+        D[:, model.mobile_atoms, i] .-= @views get_forces_mean(model.last_eval_cache)[i][:, model.mobile_atoms]
     end
 end
 
