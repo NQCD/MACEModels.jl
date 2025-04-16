@@ -109,6 +109,7 @@ The results are then put back into the correct output channels.
 """
 function batch_evaluation_loop(model_loader::Function, input_channels::Vector{RemoteChannel}, output_channels::Vector{RemoteChannel}; user_model_function::Function=mace_batch_predict, max_delay=1000)
     model = model_loader()
+    @debug "Evaluator model loading complete."
     i = 1 # Start polling for input every 1ms, then increase delay for every unsuccessfull poll
     while true
         sleep(1e-3 * i)
@@ -116,6 +117,9 @@ function batch_evaluation_loop(model_loader::Function, input_channels::Vector{Re
         to_process = findall(isready, input_channels)
         if isempty(to_process) # Nothing to do, increase delay before asking again.
             i ≤ max_delay ? i += 1 : nothing
+            if i ≥ max_delay
+                @debug "Evaluator has reached max_delay. Channel contents are:" inputs = fetch.(input_channels)
+            end
         else # Predict for all ready channels
             structures = [take!(channel) for channel in input_channels[to_process]]
             energies, forces = user_model_function(model, structures)
