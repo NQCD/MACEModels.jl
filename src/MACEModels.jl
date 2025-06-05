@@ -68,7 +68,7 @@ DOFs currently hardcoded at 3.
 - `ndofs::Int`: Number of degrees of freedom in the system.
 - `mobile_atoms::Vector{Int}`: Indices of mobile atoms in the system.
 """
-struct MACEModel{T} <: NQCModels.AdiabaticModels.AdiabaticModel
+struct MACEModel{T} <: NQCModels.ClassicalModels.ClassicalModel
     model_paths::Vector{String}
     models::Vector
     device::Vector{String}

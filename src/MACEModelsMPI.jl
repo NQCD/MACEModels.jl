@@ -65,7 +65,7 @@ struct EnergyForcesCache{T,M}
 end
 
 
-mutable struct RemoteModel <: NQCModels.AdiabaticModels.AdiabaticModel
+mutable struct RemoteModel <: NQCModels.ClassicalModels.ClassicalModel
     config::MultiProcessConfig # static
     mace_cache::EnergyForcesCache # mutable
     dofs::Int # static
