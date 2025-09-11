@@ -67,7 +67,7 @@ end
 	forces_macemodels = MACEModels.get_forces_mean(mace_prediction)
 	@info "Evaluating ase calculator using NQCModels - Check NQCDInterfASE.jl if something breaks here. "
 	energies_mace = @showprogress [NQCModels.potential(mace_model_ase, pos) for pos in structures_to_test] # energies in a.u. from ASE calculator. 
-	forces_mace = @showprogress [NQCModels.derivative(mace_model_ase, pos) for pos in structures_to_test] # forces in a.u. from ASE calculator. 
+	forces_mace = @showprogress [-NQCModels.derivative(mace_model_ase, pos) for pos in structures_to_test] # forces in a.u. from ASE calculator. 
 	@info "Checking equality to within 1e-5"
 	@. @test isapprox(energies_mace, energies_macemodels; atol = 1e-5)
 	for forces in zip(forces_mace, forces_macemodels)
