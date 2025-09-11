@@ -21,6 +21,9 @@ mace_model_ase = ClassicalASEModel(ase_structure)
 torch = pyimport("torch")
 
 cuda_avail = pyconvert(Bool, torch.backends.cuda.is_built())
+if cuda_avail
+	using CUDA
+end
 mps_avail = pyconvert(Bool, torch.backends.mps.is_built())
 
 structures = NQCBase.read_extxyz("$(@__DIR__)/test_model/h2cu_diffusion_desorption_validation.xyz")
