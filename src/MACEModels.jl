@@ -26,12 +26,14 @@ using NQCModels: NQCModels
 const torch = Ref{Py}()
 const mace_data = Ref{Py}()
 const mace_tools = Ref{Py}()
+const mace_cli = Ref{Py}()
 const numpy = Ref{Py}()
 
 function __init__()
     torch[] = pyimport("torch")
     mace_data[] = pyimport("mace.data")
     mace_tools[] = pyimport("mace.tools")
+    mace_cli[] = pyimport("mace.cli")
     numpy[] = pyimport("numpy")
 end
 
@@ -123,9 +125,11 @@ function MACEModel(
     cell::AbstractCell,
     model_paths::Vector{String};
     device::Union{String,Vector{String}}="cpu",
-    default_dtype::Type=Float32,
+    default_dtype::Type=Float32, # for better compatibility
     batch_size::Int=1,
     mobile_atoms::Vector{Int}=collect(1:length(atoms)),
+    use_CuEquivariance::Bool=false,
+    use_OpenEquivariance::Bool=false,
 )
     # Assign device to all models if only one device is given
     isa(device, String) ? device = [device for _ in 1:length(model_paths)] : nothing
@@ -162,8 +166,10 @@ function MACEModel(
     models = []
     for (i, file_path) in enumerate(model_paths)
         try
-            model = torch[].load(f=file_path, map_location=device[i])
+            model = torch[].load(f=file_path, map_location=device[i], weights_only=false)
             model = model.to(device[i])
+            model = use_CuEquivariance ? mace_cli.convert_e3nn_cueq.run(model, device=device[i]).to(device) : model
+            model = use_OpenEquivariance ? mace_cli.convert_e3nn_oeq.run(model, device=device[i]).to(device) : model
             # Check if any rogue atoms contained in base structure
             any(sort(unique(atoms.numbers)) ∉ Vector(from_dlpack(model.atomic_numbers.contiguous()))) || throw(ArgumentError("Example structure contains atom types not present in MACE model $(i)."))
             # Model is safe to add to ensemble
@@ -227,6 +233,7 @@ function mace_configuration_from_nqcd_configuration(
     cell::AbstractCell,
     R::AbstractMatrix;
     dtype::Type=Float64,
+    head_name::String="Default"
 )
     #=
     if eltype(R) != dtype
@@ -247,17 +254,22 @@ function mace_configuration_from_nqcd_configuration(
     config = mace_data[].utils.Configuration(
         atomic_numbers=PyList(atoms.numbers), # needs to be a list
         positions=numpy[].array(ase_positions), # Convert from atomic units to Ångström
-        energy=Py(zero(eltype(R))), # scalar
-        forces=numpy[].array(zeros(eltype(R), size(R'))), # N_atoms * N_dofs
-        stress=pybuiltins.None, # Avoid unnecessary tensor overhead for functions not implemented in NQCD
-        virials=pybuiltins.None, # Avoid unnecessary tensor overhead for functions not implemented in NQCD
-        dipole=pybuiltins.None, # Avoid unnecessary tensor overhead for functions not implemented in NQCD
-        charges=pybuiltins.None, # Avoid unnecessary tensor overhead for functions not implemented in NQCD
-        weight=Py(one(eltype(R))), # Can't avoid creating these tensors due to logic fallacy in MACE0.3.3
-        energy_weight=Py(one(eltype(R))), # Can't avoid creating these tensors due to logic fallacy in MACE0.3.3
-        forces_weight=Py(one(eltype(R))), # Can't avoid creating these tensors due to logic fallacy in MACE0.3.3
-        stress_weight=Py(one(eltype(R))), # Can't avoid creating these tensors due to logic fallacy in MACE0.3.3
-        virials_weight=Py(one(eltype(R))), # Can't avoid creating these tensors due to logic fallacy in MACE0.3.3
+        properties = Dict{String, Any}(
+            "energy" => Py(zero(eltype(R))), # scalar
+            "forces" => numpy[].array(zeros(eltype(R), size(R'))), # N_atoms * N_dofs
+        #     "stress" => pybuiltins.None,
+        #     "virials" => pybuiltins.None,
+        #     "dipole" => pybuiltins.None,
+        #     "charges" => pybuiltins.None,
+        ),
+        head=Py("Default"),
+        weight=Py(one(eltype(R))), 
+        property_weights = Dict(
+        #    "energy_weight" => Py(one(eltype(R))), 
+        #    "forces_weight" => Py(one(eltype(R))), 
+        #    "stress_weight" => Py(one(eltype(R))), 
+        #    "virials_weight" => Py(one(eltype(R))), 
+        ),
         config_type=Py("Default"),
         pbc=Py(pbc),
         cell=numpy[].array(cell_array),
@@ -326,7 +338,7 @@ function predict!(
                 # Place copy of batch on model device
                 clone = batch.clone().to(mace_interface.device[model_index])
                 # Evaluate model
-                model_output = Py(model(clone.to_dict(), compute_stress=true))
+                model_output = Py(model(clone.to_dict(), compute_stress=false))
                 # Split according to batching
                 #! Check how well this performs and whether this actually saves memory
                 energies = Array(from_dlpack(model_output["energy"].contiguous().detach()))
