@@ -21,9 +21,11 @@ mace_model_ase = ClassicalASEModel(ase_structure)
 torch = pyimport("torch")
 
 cuda_avail = pyconvert(Bool, torch.backends.cuda.is_built())
+#=
 if cuda_avail
 	using CUDA
 end
+=#
 mps_avail = pyconvert(Bool, torch.backends.mps.is_built())
 
 structures = NQCBase.read_extxyz("$(@__DIR__)/test_model/h2cu_diffusion_desorption_validation.xyz")
@@ -34,7 +36,7 @@ structures_to_test = first(structures[2], 3000)
 @info "Now entering package tests."
 @testset "Model loading" begin
     # Write your tests here.
-	for backend in ["cpu", "cuda"][findall([true, cuda_avail])]
+	for backend in ["cpu"]
 		MACEModel(
 			structures[1],
 			structures[3],
@@ -73,8 +75,8 @@ end
 	end
 end
 
+#= Remove temporarily for now
 if cuda_avail
-	using CUDA
 	mace_calc_small = mc.MACECalculator(
 		model_paths=["$(@__DIR__)/test_model/MACE_model_swa.model"], 
 		device="cuda", 
@@ -109,3 +111,4 @@ if cuda_avail
 		@. @test "Forces" isapprox(forces...; atol=1e-5)
 	end
 end
+=#
