@@ -71,6 +71,7 @@ end
 end
 
 if cuda_avail
+	using CUDA
 	mace_calc_small = mc.MACECalculator(
 		model_paths=["$(@__DIR__)/test_model/MACE_model_swa.model"], 
 		device="cuda", 
