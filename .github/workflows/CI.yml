@@ -24,7 +24,7 @@ jobs:
       matrix:
         version:
           - '1.10'
-          - '1.6'
+          - '1.9'
           - 'pre'
         os:
           - ubuntu-latest
@@ -37,8 +37,5 @@ jobs:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
       - uses: julia-actions/cache@v2
-      - name: Add NQCRegistry
-        run: julia -e 'using Pkg; Pkg.Registry.add(RegistrySpec(url="https://github.com/NQCD/NQCRegistry"))'
-        shell: bash
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
