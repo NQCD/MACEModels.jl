@@ -8,7 +8,6 @@ opt_einsum = ""
 pandas = ""
 e3nn = "==0.4.4"
 numpy = ""
-mkl = "" # Might be necessary
 scipy = ""
 torchaudio = ""
 torchvision = ""
