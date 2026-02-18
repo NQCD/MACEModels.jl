@@ -1,4 +1,3 @@
-__precompile__()
 module MACEModels
 
 """
@@ -160,7 +159,8 @@ function MACEModel(
     end
     # Set default dtype for torch
     dtypes_julia_python = Dict{Type,Any}(Float32 => torch[].float32, Float64 => torch[].float64)
-    torch[].set_default_dtype(dtypes_julia_python[default_dtype])
+    model_dtype = dtypes_julia_python[default_dtype]
+    torch[].set_default_dtype(model_dtype)
 
     # Load MACE models
     models = []
@@ -309,12 +309,15 @@ function predict!(
     R::Vector{<:AbstractMatrix},
     cell::Union{Vector{<:AbstractCell},AbstractCell},
 )
+    # Reset default dtype for torch in case using another model changed it. 
+    torch[].set_default_dtype(mace_interface.default_dtype)
+    
     if R != mace_interface.last_eval_cache.input_structures # Only predict if working on new structures
         dataset = Vector{Any}(undef, length(R))
         isa(cell, AbstractCell) ? cell = [cell for _ in 1:length(R)] : nothing # Always have atoms, positions and cell for each structure
         isa(atoms, Atoms) ? atoms = [atoms for _ in 1:length(R)] : nothing
         for i in eachindex(R)
-            config = mace_configuration_from_nqcd_configuration(atoms[i], cell[i], R[i]; dtype=mace_interface.default_dtype)
+            config = mace_configuration_from_nqcd_configuration(atoms[i], cell[i], R[i]; dtype=mace_interface.default_dtype_jl)
             dataset[i] = mace_data[].AtomicData.from_config(config, mace_interface.z_table, mace_interface.cutoff_radius)
         end
         # Initialise DataLoader
