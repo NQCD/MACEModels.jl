@@ -1,3 +1,6 @@
 /Manifest.toml
 .CondaPkg/
 .CondaPkg/*
+.nova
+
+**/.DS_Store
