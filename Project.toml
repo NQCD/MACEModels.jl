@@ -29,10 +29,6 @@ Unitful = "1"
 UnitfulAtomic = "1"
 julia = "1"
 
-[sources]
-NQCDInterfASE = {url="https://github.com/NQCD/NQCDInterfASE.jl.git",rev="structure-type"}
-NQCDynamics = {url="https://github.com/NQCD/NQCDynamics.jl.git",rev="main"}
-
 [extras]
 NQCDInterfASE = "4606675f-2246-4a0b-99d5-75b910de637b"
 NQCDynamics = "36248dfb-79eb-4f4d-ab9c-e29ea5f33e14"
