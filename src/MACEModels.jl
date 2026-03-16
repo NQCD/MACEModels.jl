@@ -1,4 +1,3 @@
-__precompile__()
 module MACEModels
 
 """
@@ -74,9 +73,10 @@ struct MACEModel{T} <: NQCModels.ClassicalModels.ClassicalModel
     model_paths::Vector{String}
     models::Vector
     device::Vector{String}
-    default_dtype::Type{T}
+    torch_dtype::Py
+    default_dtype::T
     batch_size::Union{Int,Nothing}
-    cutoff_radius::T
+    cutoff_radius::AbstractFloat
     last_eval_cache::MACEPredictionCache
     z_table
     atoms::Atoms
@@ -160,7 +160,8 @@ function MACEModel(
     end
     # Set default dtype for torch
     dtypes_julia_python = Dict{Type,Any}(Float32 => torch[].float32, Float64 => torch[].float64)
-    torch[].set_default_dtype(dtypes_julia_python[default_dtype])
+    torch_dtype = dtypes_julia_python[default_dtype]
+    torch[].set_default_dtype(torch_dtype)
 
     # Load MACE models
     models = []
@@ -207,7 +208,7 @@ function MACEModel(
         [], # Input structures
     )
 
-    return MACEModel(model_paths, models, device, default_dtype, batch_size, cutoff_radius, starter_mace_cache, z_table, atoms, cell, 3, mobile_atoms)
+    return MACEModel(model_paths, models, device, torch_dtype, default_dtype, batch_size, cutoff_radius, starter_mace_cache, z_table, atoms, cell, 3, mobile_atoms)
 end
 
 function Base.show(io::IO, model::MACEModel)
@@ -235,11 +236,6 @@ function mace_configuration_from_nqcd_configuration(
     dtype::Type=Float64,
     head_name::String="Default"
 )
-    #=
-    if eltype(R) != dtype
-        R = convert(Matrix{dtype}, R)
-    end
-    =#
     #! Removed positions type conversion to check if it affects prediction
     if isa(cell, InfiniteCell)
         pbc = zeros(Bool, size(R, 1))
@@ -309,6 +305,9 @@ function predict!(
     R::Vector{<:AbstractMatrix},
     cell::Union{Vector{<:AbstractCell},AbstractCell},
 )
+    # Reset default dtype for torch in case using another model changed it. 
+    torch[].set_default_dtype(mace_interface.torch_dtype)
+    
     if R != mace_interface.last_eval_cache.input_structures # Only predict if working on new structures
         dataset = Vector{Any}(undef, length(R))
         isa(cell, AbstractCell) ? cell = [cell for _ in 1:length(R)] : nothing # Always have atoms, positions and cell for each structure
