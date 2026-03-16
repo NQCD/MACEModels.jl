@@ -1,7 +1,7 @@
 name = "MACEModels"
 uuid = "29bafc4c-4f38-420f-a153-8a5a5e0bd5f6"
 authors = ["Alexander Spears <alexander.spears@warwick.ac.uk> and contributors"]
-version = "1.5.0"
+version = "1.6.0"
 
 [deps]
 CondaPkg = "992eb4ea-22a4-4c89-a5bb-47a3300528ab"
