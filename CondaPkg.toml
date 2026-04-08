@@ -4,15 +4,11 @@ channels= ["conda-forge", "pytorch"]
 prettytable = ""
 matplotlib = ""
 ase = ""
-opt_einsum = ""
 pandas = ""
-e3nn = "==0.4.4"
 numpy = ""
-nomkl = ""
 scipy = ""
+pymace = "==0.3.14"
 torchaudio = ""
 torchvision = ""
 pytorch = ">2.5"
 
-[pip.deps]
-mace-torch = "@git+https://github.com/ACEsuit/mace.git@v0.3.14"
