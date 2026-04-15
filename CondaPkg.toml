@@ -1,14 +1,14 @@
-channels= ["conda-forge", "pytorch"]
+channels = ["conda-forge", "pytorch"]
 
 [deps]
 prettytable = ""
 matplotlib = ""
 ase = ""
+torchmetrics = ""
+torchaudio = ""
 pandas = ""
+torchvision = ""
+pymace = "==0.3.14"
+pytorch = ">2.5"
 numpy = ""
 scipy = ""
-pymace = "==0.3.14"
-torchaudio = ""
-torchvision = ""
-pytorch = ">2.5"
-
