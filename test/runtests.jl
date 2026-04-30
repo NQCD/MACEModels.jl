@@ -57,7 +57,7 @@ end
         batch_size=10, # This ensures batching and un-batching operations work as well.
     )
     @info "Evaluating structures using MACEModels.predict!()"
-    mace_prediction = MACEModels.predict(
+    mace_prediction = @time MACEModels.predict(
         model,
         [s.atoms for s in structures_to_test],
         [s.positions for s in structures_to_test],
