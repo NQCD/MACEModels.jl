@@ -27,6 +27,7 @@ const mace_data = Ref{Py}()
 const mace_tools = Ref{Py}()
 const mace_cli = Ref{Py}()
 const numpy = Ref{Py}()
+const importlib_meta = Ref{Py}()
 
 function __init__()
     torch[] = pyimport("torch")
@@ -34,6 +35,17 @@ function __init__()
     mace_tools[] = pyimport("mace.tools")
     mace_cli[] = pyimport("mace.cli")
     numpy[] = pyimport("numpy")
+    importlib_meta[] = pyimport("importlib.metadata")
+    # Output a warning if MACE or torch versions are unexpected.
+    expected_mace_version = v"0.3.14"
+    expected_torch_version = v"2.10.0"
+    determined_mace_version = VersionNumber(pyconvert(String, importlib_meta[].version("mace-torch")))
+    determined_torch_version = VersionNumber(pyconvert(String, importlib_meta[].version("torch")))
+    for (pkg, exp, re) in zip(["mace-torch", "torch"], [expected_mace_version, expected_torch_version], [determined_mace_version, determined_torch_version])
+        if re > exp
+            @warn "Newer version of $pkg detected (version $re) than expected (version $exp). If you encounter issues, try downgrading to the expected version."
+        end
+    end
 end
 
 """
@@ -250,21 +262,21 @@ function mace_configuration_from_nqcd_configuration(
     config = mace_data[].utils.Configuration(
         atomic_numbers=PyList(atoms.numbers), # needs to be a list
         positions=numpy[].array(ase_positions), # Convert from atomic units to Ångström
-        properties = Dict{String, Any}(
+        properties=Dict{String,Any}(
             "energy" => Py(zero(eltype(R))), # scalar
             "forces" => numpy[].array(zeros(eltype(R), size(R'))), # N_atoms * N_dofs
-        #     "stress" => pybuiltins.None,
-        #     "virials" => pybuiltins.None,
-        #     "dipole" => pybuiltins.None,
-        #     "charges" => pybuiltins.None,
+            #     "stress" => pybuiltins.None,
+            #     "virials" => pybuiltins.None,
+            #     "dipole" => pybuiltins.None,
+            #     "charges" => pybuiltins.None,
         ),
         head=Py("Default"),
-        weight=Py(one(eltype(R))), 
-        property_weights = Dict(
-        #    "energy_weight" => Py(one(eltype(R))), 
-        #    "forces_weight" => Py(one(eltype(R))), 
-        #    "stress_weight" => Py(one(eltype(R))), 
-        #    "virials_weight" => Py(one(eltype(R))), 
+        weight=Py(one(eltype(R))),
+        property_weights=Dict(
+        #    "energy_weight" => Py(one(eltype(R))),
+        #    "forces_weight" => Py(one(eltype(R))),
+        #    "stress_weight" => Py(one(eltype(R))),
+        #    "virials_weight" => Py(one(eltype(R))),
         ),
         config_type=Py("Default"),
         pbc=Py(pbc),
@@ -305,9 +317,9 @@ function predict!(
     R::Vector{<:AbstractMatrix},
     cell::Union{Vector{<:AbstractCell},AbstractCell},
 )
-    # Reset default dtype for torch in case using another model changed it. 
+    # Reset default dtype for torch in case using another model changed it.
     torch[].set_default_dtype(mace_interface.torch_dtype)
-    
+
     if R != mace_interface.last_eval_cache.input_structures # Only predict if working on new structures
         dataset = Vector{Any}(undef, length(R))
         isa(cell, AbstractCell) ? cell = [cell for _ in 1:length(R)] : nothing # Always have atoms, positions and cell for each structure
