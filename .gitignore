@@ -2,5 +2,6 @@
 .CondaPkg/
 .CondaPkg/*
 .nova
+.vscode
 
 **/.DS_Store
