@@ -49,7 +49,7 @@ for device_string in backends[backends_avail] # Select backends to test based on
                 structures[1].cell,
                 [model_path];
                 default_dtype=Float32,
-                device=backend
+                device=device_string
             )
         # Check model has a device field corresponding to where it should be loaded.
         @test model.device == [device_string]
