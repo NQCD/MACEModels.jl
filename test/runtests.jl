@@ -9,6 +9,8 @@ ase_io = pyimport("ase.io")
 mc = pyimport("mace.calculators")
 model_path = "$(@__DIR__)/test_model/MACE_model_swa.model"
 
+@info "Checking PyTorch backends."
+torch = pyimport("torch")
 cuda_avail = get(ENV, "JULIA_MACEMODELS_TEST_CUDA", pyconvert(Bool, torch.backends.cuda.is_built()))
 #=
 if cuda_avail
@@ -30,8 +32,7 @@ ase_structure = ase_io.read("$(@__DIR__)/test_model/h2cu_diffusion_desorption_va
 ase_structure.calc = mace_calc_small
 mace_model_ase = ClassicalASEModel(ase_structure)
 
-@info "Checking PyTorch backends."
-torch = pyimport("torch")
+
 
 
 
