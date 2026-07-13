@@ -21,6 +21,13 @@ mps_avail = get(ENV, "JULIA_MACEMODELS_TEST_MPS", pyconvert(Bool, torch.backends
 
 backends = ["cpu", "cuda", "mps"]
 backends_avail = [true, cuda_avail, mps_avail]
+if cuda_avail
+    using CUDA
+end
+if mps_avail
+    using MPS
+end
+
 @info "Available PyTorch backends:" CUDA = cuda_avail MPS = mps_avail
 
 mace_calc_small = mc.MACECalculator(
