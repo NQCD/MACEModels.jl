@@ -21,6 +21,7 @@ using UnitfulAtomic
 using NQCBase
 using Statistics
 using NQCModels: NQCModels
+using CUDA
 
 const torch = Ref{Py}()
 const mace_data = Ref{Py}()
@@ -37,8 +38,8 @@ function __init__()
     numpy[] = pyimport("numpy")
     importlib_meta[] = pyimport("importlib.metadata")
     # Output a warning if MACE or torch versions are unexpected.
-    expected_mace_version = v"0.3.14"
-    expected_torch_version = v"2.10.0"
+    expected_mace_version = v"0.3.16"
+    expected_torch_version = v"2.11.0"
     determined_mace_version = VersionNumber(pyconvert(String, importlib_meta[].version("mace-torch")))
     determined_torch_version = VersionNumber(pyconvert(String, importlib_meta[].version("torch")))
     for (pkg, exp, re) in zip(["mace-torch", "torch"], [expected_mace_version, expected_torch_version], [determined_mace_version, determined_torch_version])
@@ -62,6 +63,12 @@ mutable struct MACEPredictionCache{T}
     input_structures::AbstractVector
 end
 
+abstract type Device end
+struct CPUDevice <: Device end
+struct CUDADevice <: Device end
+struct MetalDevice <: Device end
+
+
 """
 MACE interface with support for ensemble of models and batch size selection for potentially faster inference.
 
@@ -81,16 +88,18 @@ DOFs currently hardcoded at 3.
 - `ndofs::Int`: Number of degrees of freedom in the system.
 - `mobile_atoms::Vector{Int}`: Indices of mobile atoms in the system.
 """
-struct MACEModel{T} <: NQCModels.ClassicalModels.ClassicalModel
+struct MACEModel{T, D, M} <: NQCModels.ClassicalModels.ClassicalModel
     model_paths::Vector{String}
     models::Vector
     device::Vector{String}
     torch_dtype::Py
     default_dtype::T
+    dynamics_device::D
+    model_device::M
     batch_size::Union{Int,Nothing}
     cutoff_radius::AbstractFloat
     last_eval_cache::MACEPredictionCache
-    z_table
+    atom_types::Vector{Int}
     atoms::Atoms
     cell::AbstractCell
     ndofs::Int
@@ -142,35 +151,44 @@ function MACEModel(
     mobile_atoms::Vector{Int}=collect(1:length(atoms)),
     use_CuEquivariance::Bool=false,
     use_OpenEquivariance::Bool=false,
+    dynamics_on::Device = CPUDevice(),
 )
     # Assign device to all models if only one device is given
     isa(device, String) ? device = [device for _ in 1:length(model_paths)] : nothing
-    # Check selected device types are available
+    # Check selected device types are available and assign model_device
+    model_device = nothing
     for dev in device
         if split(dev, ":")[1] == "cuda"
             if pyconvert(Bool, torch[].backends.cuda.is_built())
                 @debug "CUDA device available, using GPU."
+                model_device = CUDADevice()
             else
                 @warn "CUDA device not available, falling back to CPU."
                 dev = "cpu"
+                model_device = CPUDevice()
             end
             if length(split(dev, ":")) == 2
                 @warn "Running on a selected GPU is currently unsupported. Falling back to cuda:0. See https://github.com/NQCD/MACEModels.jl/issues/13 for more information"
                 dev = "cuda:0"
+                model_device = CUDADevice()
             end
         elseif dev == "mps"
             if pyconvert(Bool, torch[].backends.mps.is_built())
                 @debug "MPS device available, using GPU."
+                model_device = MetalDevice()
             else
                 @warn "MPS device not available, falling back to CPU."
                 dev = "cpu"
+                model_device = CPUDevice()
             end
         else
             @debug "CPU selected as torch.device"
             dev = "cpu"
+            model_device = CPUDevice()
         end
     end
     # Set default dtype for torch
+    # Conversion from Julia dtypes to PyTorch dtypes.
     dtypes_julia_python = Dict{Type,Any}(Float32 => torch[].float32, Float64 => torch[].float64)
     torch_dtype = dtypes_julia_python[default_dtype]
     torch[].set_default_dtype(torch_dtype)
@@ -202,7 +220,7 @@ function MACEModel(
 
     # Build z-table
     # Hardcoding this to the model so we can handle input structures using a subset of all learned atom types.
-    z_table = mace_tools[].utils.AtomicNumberTable(Vector(from_dlpack(models[1].atomic_numbers.contiguous())))
+    atom_numbers = Vector(from_dlpack(models[1].atomic_numbers.contiguous()))
 
     # Freeze parameters
     for model in models
@@ -220,7 +238,7 @@ function MACEModel(
         [], # Input structures
     )
 
-    return MACEModel(model_paths, models, device, torch_dtype, default_dtype, batch_size, cutoff_radius, starter_mace_cache, z_table, atoms, cell, 3, mobile_atoms)
+    return MACEModel(model_paths, models, device, torch_dtype, default_dtype, dynamics_on, model_device, batch_size, cutoff_radius, starter_mace_cache, atom_numbers, atoms, cell, 3, mobile_atoms)
 end
 
 function Base.show(io::IO, model::MACEModel)
@@ -232,60 +250,7 @@ function Base.show(io::IO, model::MACEModel)
     )
 end
 
-"""
-    mace_configuration_from_nqcd_configuration(
-    atoms::Atoms,
-    cell::Union{InfiniteCell, PeriodicCell},
-    R::AbstractMatrix,
-)
-
-Converter into a single mace.data.utils.Configuration to make use of MACE's data loading.
-"""
-function mace_configuration_from_nqcd_configuration(
-    atoms::Atoms,
-    cell::AbstractCell,
-    R::AbstractMatrix;
-    dtype::Type=Float64,
-    head_name::String="Default"
-)
-    #! Removed positions type conversion to check if it affects prediction
-    if isa(cell, InfiniteCell)
-        pbc = zeros(Bool, size(R, 1))
-        cell_array = zeros(dtype, size(R, 1), size(R, 1))
-    elseif isa(cell, PeriodicCell)
-        pbc = cell.periodicity
-        cell_array = permutedims(Matrix{eltype(R)}(ustrip.(auconvert.(u"Å", cell.vectors))), (2, 1))
-    end
-
-    ase_positions = permutedims(ustrip.(auconvert.(u"Å", R)), (2, 1))
-
-    config = mace_data[].utils.Configuration(
-        atomic_numbers=PyList(atoms.numbers), # needs to be a list
-        positions=numpy[].array(ase_positions), # Convert from atomic units to Ångström
-        properties=Dict{String,Any}(
-            "energy" => Py(zero(eltype(R))), # scalar
-            "forces" => numpy[].array(zeros(eltype(R), size(R'))), # N_atoms * N_dofs
-            #     "stress" => pybuiltins.None,
-            #     "virials" => pybuiltins.None,
-            #     "dipole" => pybuiltins.None,
-            #     "charges" => pybuiltins.None,
-        ),
-        head=Py("Default"),
-        weight=Py(one(eltype(R))),
-        property_weights=Dict(
-        #    "energy_weight" => Py(one(eltype(R))),
-        #    "forces_weight" => Py(one(eltype(R))),
-        #    "stress_weight" => Py(one(eltype(R))),
-        #    "virials_weight" => Py(one(eltype(R))),
-        ),
-        config_type=Py("Default"),
-        pbc=Py(pbc),
-        cell=numpy[].array(cell_array),
-    )
-    return Py(config)
-end
-
-# ToDo: Evaluation function that handles model evaluation and caching of results.
+include("mace_structures.jl")
 
 """
     predict!(
