@@ -108,6 +108,12 @@ ab_structure = System(first(NQCBase.read_extxyz("../test/test_model/h2cu_diffusi
 # ╔═╡ fe66bc47-0ee3-4880-ba89-ad1aa591d0e2
 pos_cu = position(ab_structure, :) .|> ustrip |> cu
 
+# ╔═╡ 02bca0bd-d37e-41e5-8b06-6a654961dc37
+ta = CUDA.zeros(Float32, 3,56)
+
+# ╔═╡ 6e63bfaa-e12c-4308-ba36-9690cca1354a
+ta
+
 # ╔═╡ 6e7f14ce-08c6-4ee1-b8d1-e8096fc28172
 # ab_nl = neighbour_list(ab_structure, 5.0u"Å")
 
@@ -143,9 +149,15 @@ Pkg.add("KernelAbstractions")
 
 # ╔═╡ e7c0df73-dc5d-4b1b-a8ea-91be91d1a572
 @kernel function shift_dot!(distance_shifts, unit_shifts, cell)
-    i,j,k = @index(Global, NTuple)
-    @inbounds distance_shifts[j,i] = sum(cell[j,k] * unit_shifts[i])
+    i,j = @index(Global, NTuple)
+    @inbounds distance_shifts[i,j] += cell[i,k] * unit_shifts[k,j]
 end
+
+# ╔═╡ 57fb93b5-b454-478c-8cb8-87c437fadcf6
+Smat = reinterpret(reshape, Int32, ab_nl.S)
+
+# ╔═╡ 93135cde-c8f5-45f1-b06b-1a56d020b05a
+shift_dot!(zero(Smat), Smat, cell_cu)
 
 # ╔═╡ 775f9a74-c64b-4ecf-8e2c-05d99ed5fc39
 begin
@@ -159,15 +171,15 @@ end
 
 # ╔═╡ 573f6781-5002-4c77-96c4-e9a6d7bff6e8
 begin
-    shifts = zeros(Float32, 3, length(ab_nl.S))
-    for idx in eachindex(ab_nl.S)
-        shifts[:,idx] .= ab_nl.C * ab_nl.S[idx]
-    end
-    shifts
+    shifts = reinterpret(reshape, Int32, ab_nl.S)
+    # for idx in eachindex(ab_nl.S)
+    #     shifts[:,idx] .= ab_nl.C * ab_nl.S[idx]
+    # end
+    
 end
 
 # ╔═╡ 526969ee-e5fb-41bb-9d92-c8746e5d8beb
-hcat(ab_nl.S...)
+@code_lowered stack(x -> ab_nl.C * x, ab_nl.S)
 
 # ╔═╡ a3cbad78-7464-4445-b02d-eaf5647c34cb
 isapprox.(eachcol(shifts3), eachcol(mace_atomicconfig.shifts |> from_dlpack), rtol = 1e-6) |> all # Deviates due to Float32 vs. Float64, but not significantly. 
@@ -177,6 +189,12 @@ nqcd_structure = first(NQCBase.read_extxyz("../test/test_model/h2cu_diffusion_de
 
 # ╔═╡ a7fcd2e3-445b-4ef9-9cfc-37dfb6305c24
 nqcd_structure.cell.vectors |> CuArray |> PeriodicCell
+
+# ╔═╡ 33d71769-e137-4c1a-8ec7-5651656362c0
+nqcd_structure.positions |> CuArray
+
+# ╔═╡ c54292bf-cb54-4cbe-972f-cebc1822ff67
+ta .= nqcd_structure.positions |> CuArray .|> Float32
 
 # ╔═╡ 3b35fe3c-17af-45e3-b262-adc291352543
 onehot = vcat(
@@ -222,8 +240,8 @@ Py(nothing)
 # ╔═╡ 11486b89-b7af-4ee1-8d81-7aae8534b202
 edge_index=DLPack.share(
             hcat(
-                (ab_nl.i .-1) .* .!mask, 
-                (ab_nl.j .-1) .* .!mask,
+                (ab_nl.i .-1) .* mask, 
+                (ab_nl.j .-1) .* mask,
             ),
             torch.from_dlpack,
         )
@@ -297,8 +315,8 @@ mace_torch_geometric = pyimport("mace.tools.torch_geometric")
 
 # ╔═╡ bc88f1c7-dd39-4f09-83ec-6bd8151c3699
 dataloader = mace_torch_geometric.DataLoader(
-    PyList([atd_recreate, mace_atomicconfig, ]),
-    batch_size = 1,
+    PyList(repeat([atd_recreate ], 20)),
+    batch_size = 2,
     shuffle = false,
     drop_last = false,
 )
@@ -306,12 +324,32 @@ dataloader = mace_torch_geometric.DataLoader(
 # ╔═╡ 3d852595-33af-42af-ac5b-abc6b66d0a1d
 model = torch.load("../test/test_model/MACE_model_swa.model").to("cuda")
 
+# ╔═╡ 53428dee-8cb3-43ae-9124-a2645a5ea5cd
+for p in model.parameters()
+    
+end
+
+# ╔═╡ be1aebc1-fa59-45a4-a971-4d5e64ab4dfc
+out = Py[]
+
 # ╔═╡ d9152912-7e1b-4d25-b67e-46d7155a9539
 for (i,batch) in enumerate(dataloader)
     println(i)
-    out = model(batch.to("cuda"))
-    println(out["forces"] |> from_dlpack)
+    push!(out, model(batch.to("cuda")))
+    println(out[end]["forces"] |> from_dlpack)
 end
+
+# ╔═╡ 01ed7e3d-3a1b-4545-a4f0-cfec0459ed69
+out_cuda = out[1]["forces"] |> from_dlpack
+
+# ╔═╡ 8c204976-fa56-4605-af30-68f7d21bba2d
+@views st1 = out_cuda[:,1:56]
+
+# ╔═╡ 7f6f65c2-9e75-4faf-b5c1-c40dbfb55a7c
+st1_cpu = zeros(3,56)
+
+# ╔═╡ 3192dd10-65bf-41e4-b32d-cc9bb50bcc76
+st1_cpu .= st1
 
 # ╔═╡ Cell order:
 # ╠═583d44ce-828c-11f1-8cd6-0d8d5c8c0dbe
@@ -337,6 +375,10 @@ end
 # ╠═b2267c48-e6c8-427f-aa4c-70c094a50804
 # ╠═a7fcd2e3-445b-4ef9-9cfc-37dfb6305c24
 # ╠═fe66bc47-0ee3-4880-ba89-ad1aa591d0e2
+# ╠═33d71769-e137-4c1a-8ec7-5651656362c0
+# ╠═02bca0bd-d37e-41e5-8b06-6a654961dc37
+# ╠═c54292bf-cb54-4cbe-972f-cebc1822ff67
+# ╠═6e63bfaa-e12c-4308-ba36-9690cca1354a
 # ╠═6e7f14ce-08c6-4ee1-b8d1-e8096fc28172
 # ╠═5f1af5ac-45a4-48ee-861c-577b4487c151
 # ╠═7f6e31fe-a24d-4e78-96dc-0b2c8aecb4b4
@@ -350,6 +392,8 @@ end
 # ╠═d8f9ed81-dd7f-468a-88bb-2368ea1af615
 # ╠═2605e644-9e81-4de0-a357-e90419fa0340
 # ╠═e7c0df73-dc5d-4b1b-a8ea-91be91d1a572
+# ╠═57fb93b5-b454-478c-8cb8-87c437fadcf6
+# ╠═93135cde-c8f5-45f1-b06b-1a56d020b05a
 # ╠═775f9a74-c64b-4ecf-8e2c-05d99ed5fc39
 # ╠═573f6781-5002-4c77-96c4-e9a6d7bff6e8
 # ╠═526969ee-e5fb-41bb-9d92-c8746e5d8beb
@@ -374,4 +418,10 @@ end
 # ╠═c7eadd90-19ad-41b5-81ad-2f0646c92724
 # ╠═bc88f1c7-dd39-4f09-83ec-6bd8151c3699
 # ╠═3d852595-33af-42af-ac5b-abc6b66d0a1d
+# ╠═53428dee-8cb3-43ae-9124-a2645a5ea5cd
+# ╠═be1aebc1-fa59-45a4-a971-4d5e64ab4dfc
 # ╠═d9152912-7e1b-4d25-b67e-46d7155a9539
+# ╠═01ed7e3d-3a1b-4545-a4f0-cfec0459ed69
+# ╠═8c204976-fa56-4605-af30-68f7d21bba2d
+# ╠═7f6f65c2-9e75-4faf-b5c1-c40dbfb55a7c
+# ╠═3192dd10-65bf-41e4-b32d-cc9bb50bcc76
