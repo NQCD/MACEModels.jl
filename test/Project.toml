@@ -1,4 +1,5 @@
 [deps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 CondaPkg = "992eb4ea-22a4-4c89-a5bb-47a3300528ab"
 DLPack = "53c2dc0f-f7d5-43fd-8906-6c0220547083"
 Distributed = "8ba89e20-285c-5b6f-9357-94700520ee1b"

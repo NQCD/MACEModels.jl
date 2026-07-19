@@ -89,8 +89,8 @@ function mace_AtomicData_from_julia(
     atomsbase_neighbourlist = neighbour_list(
         positions_neighbourlistable,
         model.cutoff_radius,
-        cell_device,
-        pbc_device,
+        auconvert.(u"Å", cell.vectors) .|> ustrip,
+        ab_structure.cell.periodicity,
     )
     # MACE reduces the neighbour list to remove self-interaction within the same cell. This mask should be applied to the edge indices to hide those interactions from MACE.
     non_self_edge_mask = mtx_to_device(
