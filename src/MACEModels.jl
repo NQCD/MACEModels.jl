@@ -68,6 +68,10 @@ struct CPUDevice <: Device end
 struct CUDADevice <: Device end
 struct MetalDevice <: Device end
 
+# Move matrices to the correct device.
+mtx_to_device(mtx::AbstractArray, device::CUDADevice) = CuArray(mtx)
+mtx_to_device(mtx::AbstractArray, device::CPUDevice) = mtx
+
 
 """
 MACE interface with support for ensemble of models and batch size selection for potentially faster inference.
@@ -286,35 +290,38 @@ function predict!(
     torch[].set_default_dtype(mace_interface.torch_dtype)
 
     if R != mace_interface.last_eval_cache.input_structures # Only predict if working on new structures
-        dataset = Vector{Any}(undef, length(R))
+        dataset = Vector{Py}(undef, length(R))
         isa(cell, AbstractCell) ? cell = [cell for _ in 1:length(R)] : nothing # Always have atoms, positions and cell for each structure
         isa(atoms, Atoms) ? atoms = [atoms for _ in 1:length(R)] : nothing
         for i in eachindex(R)
-            config = mace_configuration_from_nqcd_configuration(atoms[i], cell[i], R[i]; dtype=mace_interface.default_dtype)
-            dataset[i] = mace_data[].AtomicData.from_config(config, mace_interface.z_table, mace_interface.cutoff_radius)
+            dataset[i] = mace_AtomicData_from_julia(
+                mace_interface,
+                atoms[i],
+                R[i],
+                cell[i],
+            )
         end
         # Initialise DataLoader
-        batch_size = mace_interface.batch_size === nothing ? length(dataset) : mace_interface.batch_size # Ensure there is a batch size
         mace_DataLoader = mace_tools[].torch_geometric.dataloader.DataLoader(
             dataset=dataset,
-            batch_size=batch_size,
+            batch_size=mace_interface.batch_size,
             shuffle=false,
             drop_last=false,
         )
         # Allocate results arrays for prediction
         mace_interface.last_eval_cache.input_structures = deepcopy(R)
-        mace_interface.last_eval_cache.energies = [zeros(mace_interface.default_dtype, length(mace_interface.models)) for i in eachindex(R)]
-        mace_interface.last_eval_cache.forces = [zeros(mace_interface.default_dtype, mace_interface.ndofs, length(atoms[i]), length(mace_interface.models)) for i in eachindex(R)]
+        mace_interface.last_eval_cache.energies = [mtx_to_device(zeros(mace_interface.default_dtype, length(mace_interface.models)), mace_interface.dynamics_device) for i in eachindex(R)]
+        mace_interface.last_eval_cache.forces = [mtx_to_device(zeros(mace_interface.default_dtype, mace_interface.ndofs, length(atoms[i]), length(mace_interface.models)), mace_interface.dynamics_device) for i in eachindex(R)]
 
 
         # Iterate through dataloader and evaluate each model
         for (batch_index, batch) in enumerate(mace_DataLoader)
-            evalcache_index = (batch_index - 1) * batch_size # Pointer to the start of the batch in the output arrays
+            evalcache_index = (batch_index - 1) * mace_interface.batch_size # Pointer to the start of the batch in the output arrays
             for (model_index, model) in enumerate(mace_interface.models)
                 # Place copy of batch on model device
                 clone = batch.clone().to(mace_interface.device[model_index])
                 # Evaluate model
-                model_output = Py(model(clone.to_dict(), compute_stress=false))
+                model_output = Py(model(clone, compute_stress=false))
                 # Split according to batching
                 #! Check how well this performs and whether this actually saves memory
                 energies = Array(from_dlpack(model_output["energy"].contiguous().detach()))

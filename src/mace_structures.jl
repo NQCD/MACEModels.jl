@@ -69,9 +69,6 @@ end
 function cell_to_device(cell::InfiniteCell, device::CPUDevice, data_type::Type)
     return zeros(data_type, 3, 3), cell.periodicity
 end
-# Move matrices to the correct device.
-mtx_to_device(mtx::AbstractMatrix, device::CUDADevice) = CuArray(mtx)
-mtx_to_device(mtx::AbstractMatrix, device::CPUDevice) = mtx
 
 function mace_AtomicData_from_julia(
     model::MACEModel,
@@ -79,14 +76,14 @@ function mace_AtomicData_from_julia(
     R::AbstractMatrix,
     cell::AbstractCell
 )
-    R_angstrom = ustrip.(auconvert.(u"Å", R))
+    R_angstrom = ustrip.(auconvert.(u"Å", R)) .|> model.default_dtype
     ab_structure = System(
         NQCBase.Structure(
             atoms,
             Array(R), # Need to pull this to CPU for conversion into something neighbour-listable.
             cell)
     )
-    cell_device, pbc_device = cell_to_device(cell, model.model_device)
+    cell_device, pbc_device = cell_to_device(cell, model.model_device, model.default_dtype)
     positions_neighbourlistable = mtx_to_device(position(ab_structure, :) .|> ustrip, model.model_device)
     # Use generic NeighbourLists API that automatically selects device based on inputs.
     atomsbase_neighbourlist = neighbour_list(
@@ -101,7 +98,7 @@ function mace_AtomicData_from_julia(
         model.model_device
     )
     # Distance shifts and unit shifts need to be computed on CPU because I couldn't find a way of doing the dot product on each StaticArray in the CuArray on GPU.
-    unit_shifts_cpu = reduce(hcat, Array(atomsbase_neighbourlist.S)) .|> model.data_type
+    unit_shifts_cpu = reduce(hcat, Array(atomsbase_neighbourlist.S)) .|> model.default_dtype
     distance_shifts = deepcopy(unit_shifts_cpu)
     for idx in axes(distance_shifts, 2)
         distance_shifts[:,idx] = atomsbase_neighbourlist.C * unit_shifts_cpu[:, idx] # neighbourlist.C seems to always be on CPU
@@ -111,33 +108,33 @@ function mace_AtomicData_from_julia(
         [permutedims(atoms.numbers .== t) for t in model.atom_types |> sort]...
     ) .|> model.default_dtype
     # AtomicData constructor, mainly stolen from mace-torch:mace/data/atomic_data.py
-    atomicdata = mace_data.AtomicData(
+    atomicdata = mace_data[].AtomicData(
         edge_index=DLPack.share( # edge_index: [2,N] in Python, get rid of connectivity for self-interactions in the same cell.
             hcat(
                 (atomsbase_neighbourlist.i .-1) .* non_self_edge_mask,
                 (atomsbase_neighbourlist.j .-1) .* non_self_edge_mask,
             ),
-            torch.from_dlpack,
+            torch[].from_dlpack,
         ),
         positions=DLPack.share( # positions: [N,3] in Python
             R_angstrom,
-            torch.from_dlpack,
+            torch[].from_dlpack,
         ),
         shifts=DLPack.share(
             mtx_to_device(distance_shifts, model.model_device),
-            torch.from_dlpack,
+            torch[].from_dlpack,
         ),
         unit_shifts=DLPack.share(
             mtx_to_device(unit_shifts_cpu, model.model_device),
-            torch.from_dlpack,
+            torch[].from_dlpack,
         ),
         cell=DLPack.share(
             cell_device,
-            torch.from_dlpack,
+            torch[].from_dlpack,
         ),
         node_attrs=DLPack.share(
             mtx_to_device(onehot, model.model_device),
-            torch.from_dlpack,
+            torch[].from_dlpack,
         ),
         weight=nothing,
         head=nothing,
@@ -148,7 +145,7 @@ function mace_AtomicData_from_julia(
         dipole_weight=nothing |> Py,
         charges_weight=nothing |> Py,
         polarizability_weight=nothing |> Py,
-        forces=DLPack.share(mtx_to_device(zeros(R), model.model_device), torch.from_dlpack),
+        forces=DLPack.share(mtx_to_device(zero(R), model.model_device), torch[].from_dlpack),
         energy=nothing |> Py,
         stress=nothing |> Py,
         virials=nothing |> Py,
@@ -158,7 +155,7 @@ function mace_AtomicData_from_julia(
         total_charge=nothing |> Py,
         polarizability=nothing |> Py,
         # total_spin=nothing,
-        pbc=DLPack.share(pbc_device, torch.from_dlpack),
+        pbc=DLPack.share(pbc_device, torch[].from_dlpack),
         # # density_coefficients=density_coefficients,
         # rcell=nothing,
         # volume=nothing,
