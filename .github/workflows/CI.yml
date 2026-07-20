@@ -41,9 +41,9 @@ jobs:
         with:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
-          env: 
-            JULIA_CONDAPKG_BACKEND: "Null"
-            JULIA_PYTHONCALL_EXE: ${{ steps.python-install.outputs.python }} # Hardcode Python executable to the one  
+        env:
+          JULIA_CONDAPKG_BACKEND: "Null"
+          JULIA_PYTHONCALL_EXE: ${{ steps.python-install.outputs.python }} # Hardcode Python executable to the one  
       - uses: julia-actions/cache@v2
         env: 
             JULIA_CONDAPKG_BACKEND: "Null"
