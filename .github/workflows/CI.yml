@@ -23,8 +23,8 @@ jobs:
       fail-fast: false
       matrix:
         version:
-          - '1.10'
-          - '1.9'
+          - '1.11'
+          - '1.12'
           - 'pre'
         os:
           - ubuntu-latest
@@ -32,10 +32,27 @@ jobs:
           - x64
     steps:
       - uses: actions/checkout@v4
+      - name: Set up Python dependencies
+        id: python-install
+        run: | 
+          python3 -m pip install ase matplotlib mace-torch
+          echo "python=$(which python3)" >> $GITHUB_OUTPUT
       - uses: julia-actions/setup-julia@v2
         with:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
+          env: 
+            JULIA_CONDAPKG_BACKEND: "Null"
+            JULIA_PYTHONCALL_EXE: ${{ steps.python-install.outputs.python }} # Hardcode Python executable to the one  
       - uses: julia-actions/cache@v2
+        env: 
+            JULIA_CONDAPKG_BACKEND: "Null"
+            JULIA_PYTHONCALL_EXE: ${{ steps.python-install.outputs.python }} # Hardcode Python executable to the one  
       - uses: julia-actions/julia-buildpkg@v1
+        env: 
+            JULIA_CONDAPKG_BACKEND: "Null"
+            JULIA_PYTHONCALL_EXE: ${{ steps.python-install.outputs.python }} # Hardcode Python executable to the one  
       - uses: julia-actions/julia-runtest@v1
+        env: 
+            JULIA_CONDAPKG_BACKEND: "Null"
+            JULIA_PYTHONCALL_EXE: ${{ steps.python-install.outputs.python }} # Hardcode Python executable to the one  
