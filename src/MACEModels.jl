@@ -22,6 +22,7 @@ using NQCBase
 using Statistics
 using NQCModels: NQCModels
 using CUDA
+using StaticArrays
 
 const torch = Ref{Py}()
 const mace_data = Ref{Py}()
@@ -100,7 +101,7 @@ struct MACEModel{T, D, M} <: NQCModels.ClassicalModels.ClassicalModel
     default_dtype::T
     dynamics_device::D
     model_device::M
-    batch_size::Union{Int,Nothing}
+    batch_size::Int
     cutoff_radius::AbstractFloat
     last_eval_cache::MACEPredictionCache
     atom_types::Vector{Int}
@@ -235,14 +236,13 @@ function MACEModel(
 
     # Initialise an evaluation cache
     starter_mace_cache = MACEPredictionCache(
-        [[convert(default_dtype, 1.0)]], # Energies
-        [hcat(convert(default_dtype, 1.0))], # Node energies
-        [[convert(default_dtype, 1.0);;;]], # Forces
-        [[convert(default_dtype, 1.0);;;]], # Stresses
-        [], # Input structures
+        mtx_to_device([[convert(default_dtype, 1.0)]], dynamics_on), # Energies
+        mtx_to_device([convert(default_dtype, 1.0);;;], dynamics_on), # Forces
+        mtx_to_device([0,1], dynamics_on), # Pointer
+        mtx_to_device([[convert(default_dtype, 1.0);;]], dynamics_on), # Structures
     )
 
-    return MACEModel(model_paths, models, device, torch_dtype, default_dtype, dynamics_on, model_device, batch_size, cutoff_radius, starter_mace_cache, atom_numbers, atoms, cell, 3, mobile_atoms)
+    return MACEModel(model_paths, models, device, torch_dtype, default_dtype(1.0), dynamics_on, model_device, batch_size, cutoff_radius, starter_mace_cache, atom_numbers, atoms, cell, 3, mobile_atoms)
 end
 
 function Base.show(io::IO, model::MACEModel)
@@ -281,11 +281,11 @@ Can be either a vector of different Atoms objects or a single Atoms object.
 Can be either a vector of different Cell objects or a single Cell object.
 """
 function predict!(
-    mace_interface::MACEModel,
+    mace_interface::MACEModel{T,D,M},
     atoms::Union{Vector{<:Atoms},Atoms},
     R::Vector{<:AbstractMatrix},
     cell::Union{Vector{<:AbstractCell},AbstractCell},
-)
+) where {T,D,M}
     # Reset default dtype for torch in case using another model changed it.
     torch[].set_default_dtype(mace_interface.torch_dtype)
 
