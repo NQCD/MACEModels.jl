@@ -57,75 +57,128 @@ end
 # Ensure AtomicData are created with pointers to DLPack versions of everything so the GC is done properly.
 
 # Translate cells to correct format
-function cell_to_device(cell::PeriodicCell, device::CUDADevice, data_type::Type)
+function cell_to_device(cell::PeriodicCell, device::CUDADevice, data_type::Type)::Tuple{<:CuArray, <:CuArray}
     return CuArray(data_type.(ustrip.(auconvert.(u"Å", cell.vectors)))), CuArray(cell.periodicity)
 end
-function cell_to_device(cell::PeriodicCell, device::CPUDevice, data_type::Type)
+function cell_to_device(cell::PeriodicCell, device::CPUDevice, data_type::Type)::Tuple{<:AbstractArray, <:AbstractArray}
     return data_type.(ustrip.(auconvert.(u"Å", cell.vectors))), cell.periodicity
 end
-function cell_to_device(cell::InfiniteCell, device::CUDADevice, data_type::Type)
+function cell_to_device(cell::InfiniteCell, device::CUDADevice, data_type::Type)::Tuple{<:CuArray, <:CuArray}
     return CuArray(zeros(data_type, 3,3)), CuArray(cell.periodicity)
 end
-function cell_to_device(cell::InfiniteCell, device::CPUDevice, data_type::Type)
+function cell_to_device(cell::InfiniteCell, device::CPUDevice, data_type::Type)::Tuple{<:AbstractArray, <:AbstractArray}
     return zeros(data_type, 3, 3), cell.periodicity
 end
 
+function make_neighbourlist(
+    model::MACEModel{T,D,M},
+    atoms::Atoms,
+    R::AbstractMatrix,
+    cell::AbstractCell,
+) where {T, D, M}
+    R_angstrom = Matrix{T}(ustrip.(auconvert.(u"Å", R))) # D
+    cell_device, pbc_device = cell_to_device(cell, M(), T)
+    positions_neighbourlistable = mtx_to_device([SVector{3}(col) for col in eachcol(R_angstrom)], M())
+    # The generic NeighbourLists API is type-unstable due to how it processes the choice of lazy-loading vs. no lazy-loading.
+    # Since we must fully allocate the neighbour list anyway, we might as well skip it and use the non-API functions which are type-stable.
+    # This might lead to bugs in future if they change anything though. Implemented with NeighbourLists v0.6.2
+    atomsbase_neighbourlist = NeighbourLists.materialize_pairlist(
+        NeighbourLists.build_cell_list(
+            positions_neighbourlistable,
+            model.cutoff_radius,
+            auconvert.(u"Å", cell.vectors) .|> ustrip,
+            cell.periodicity,
+            backend = NeighbourLists.get_array_backend(positions_neighbourlistable)
+        );
+        backend = NeighbourLists.get_array_backend(positions_neighbourlistable)
+    ) # Outputs already allocated on M
+    ab_i = atomsbase_neighbourlist.i # Already allocated on M
+    ab_j = atomsbase_neighbourlist.j # Already allocated on M
+    ab_S = mtx_to_device(reinterpret(reshape, Int32, atomsbase_neighbourlist.S), M()) # Reinterpretation needed on M
+    return ab_i, ab_j, ab_S, cell_device, pbc_device
+end
+
+function to_julia_dict(
+    model::MACEModel{T,D,M},
+    atoms::Atoms,
+    R::AbstractMatrix,
+    cell::AbstractCell,
+) where {T,D,M}
+    R_angstrom = Matrix{T}(ustrip.(auconvert.(u"Å", R))) # D
+    ab_i, ab_j, ab_S, cell_device, pbc_device = make_neighbourlist(model, atoms, R, cell)
+    non_self_edge_mask = .!(ab_i .== ab_j .&& sum(ab_S) == 0)
+    non_self_edge_mask = mtx_to_device(
+        non_self_edge_mask,
+        M(),
+    )
+    # Dot product with the cell to turn into distance shifts.
+    # unit_shifts_cpu = Matrix{T}(reduce(hcat, Vector(atomsbase_neighbourlist.S)))
+    unit_shifts_cpu = copy(ab_S) # Maybe this variant is faster?
+    distance_shifts = cell_device * unit_shifts_cpu
+    # Build one-hot encoding of atomic numbers for node attributes.
+    onehot = Matrix{T}(vcat(
+        [permutedims(atoms.numbers .== t) for t in model.atom_types |> sort]...
+    ))
+    # Now use the Batch dict representation for mace data, but without batch and ptr keys since they may need changing.
+    # Also keep all arrays initialised in Julia for now so they can be concatenated easily.
+    dict_representation = Dict{String, Any}(
+        "head" => Int[0], # one per structure
+        "cell" => cell_device,
+        "edge_index" => hcat(# edge_index: [2,N] in Python, get rid of connectivity for self-interactions in the same cell.
+            (ab_i .-1) .* non_self_edge_mask,
+            (ab_j .-1) .* non_self_edge_mask,
+        ),
+        "energy" => zeros(T, 1),
+        "forces" => zero(R),
+        "node_attrs" => onehot,
+        "positions" => R_angstrom, # positions: [N,3] in Angstrom
+        "shifts" => distance_shifts,
+        "unit_shifts" => unit_shifts_cpu,
+        "weight" => ones(T, 1),
+    )
+    return dict_representation
+end
+
 function mace_AtomicData_from_julia(
-    model::MACEModel,
+    model::MACEModel{T,D,M},
     atoms::Atoms,
     R::AbstractMatrix,
     cell::AbstractCell
-)
-    R_angstrom = ustrip.(auconvert.(u"Å", R)) .|> model.default_dtype
-    ab_structure = System(
-        NQCBase.Structure(
-            atoms,
-            Array(R), # Need to pull this to CPU for conversion into something neighbour-listable.
-            cell)
-    )
-    cell_device, pbc_device = cell_to_device(cell, model.model_device, model.default_dtype)
-    positions_neighbourlistable = mtx_to_device(position(ab_structure, :) .|> ustrip, model.model_device)
-    # Use generic NeighbourLists API that automatically selects device based on inputs.
-    atomsbase_neighbourlist = neighbour_list(
-        positions_neighbourlistable,
-        model.cutoff_radius,
-        auconvert.(u"Å", cell.vectors) .|> ustrip,
-        ab_structure.cell.periodicity,
-    )
+) where {T,D,M}
+    ab_i, ab_j, ab_S, cell_device, pbc_device = make_neighbourlist(model, atoms, R, cell)
     # MACE reduces the neighbour list to remove self-interaction within the same cell. This mask should be applied to the edge indices to hide those interactions from MACE.
+    non_self_edge_mask = .!(ab_i .== ab_j .&& sum(ab_S) == 0)
     non_self_edge_mask = mtx_to_device(
-        .!(atomsbase_neighbourlist.i .== atomsbase_neighbourlist.j .& sum.(atomsbase_neighbourlist.S) .== 0),
-        model.model_device
+        non_self_edge_mask,
+        M(),
     )
-    # Distance shifts and unit shifts need to be computed on CPU because I couldn't find a way of doing the dot product on each StaticArray in the CuArray on GPU.
-    unit_shifts_cpu = reduce(hcat, Array(atomsbase_neighbourlist.S)) .|> model.default_dtype
-    distance_shifts = deepcopy(unit_shifts_cpu)
-    for idx in axes(distance_shifts, 2)
-        distance_shifts[:,idx] = atomsbase_neighbourlist.C * unit_shifts_cpu[:, idx] # neighbourlist.C seems to always be on CPU
-    end
+    # Dot product with the cell to turn into distance shifts.
+    # unit_shifts_cpu = Matrix{T}(reduce(hcat, Vector(atomsbase_neighbourlist.S)))
+    unit_shifts_cpu = copy(ab_S) # Maybe this variant is faster?
+    distance_shifts = cell_device * unit_shifts_cpu
     # Build one-hot encoding of atomic numbers for node attributes.
-    onehot = vcat(
+    onehot = Matrix{T}(vcat(
         [permutedims(atoms.numbers .== t) for t in model.atom_types |> sort]...
-    ) .|> model.default_dtype
+    ))
     # AtomicData constructor, mainly stolen from mace-torch:mace/data/atomic_data.py
     atomicdata = mace_data[].AtomicData(
         edge_index=DLPack.share( # edge_index: [2,N] in Python, get rid of connectivity for self-interactions in the same cell.
             hcat(
-                (atomsbase_neighbourlist.i .-1) .* non_self_edge_mask,
-                (atomsbase_neighbourlist.j .-1) .* non_self_edge_mask,
+                (ab_i .-1) .* non_self_edge_mask,
+                (ab_j .-1) .* non_self_edge_mask,
             ),
             torch[].from_dlpack,
         ),
         positions=DLPack.share( # positions: [N,3] in Python
-            R_angstrom,
+            mtx_to_device(R_angstrom, M()),
             torch[].from_dlpack,
         ),
         shifts=DLPack.share(
-            mtx_to_device(distance_shifts, model.model_device),
+            mtx_to_device(distance_shifts, M()),
             torch[].from_dlpack,
         ),
         unit_shifts=DLPack.share(
-            mtx_to_device(unit_shifts_cpu, model.model_device),
+            mtx_to_device(unit_shifts_cpu, M()),
             torch[].from_dlpack,
         ),
         cell=DLPack.share(
@@ -133,7 +186,7 @@ function mace_AtomicData_from_julia(
             torch[].from_dlpack,
         ),
         node_attrs=DLPack.share(
-            mtx_to_device(onehot, model.model_device),
+            mtx_to_device(onehot, M()),
             torch[].from_dlpack,
         ),
         weight=nothing,
@@ -145,7 +198,7 @@ function mace_AtomicData_from_julia(
         dipole_weight=nothing |> Py,
         charges_weight=nothing |> Py,
         polarizability_weight=nothing |> Py,
-        forces=DLPack.share(mtx_to_device(zero(R), model.model_device), torch[].from_dlpack),
+        forces=DLPack.share(mtx_to_device(zero(R), M()), torch[].from_dlpack),
         energy=nothing |> Py,
         stress=nothing |> Py,
         virials=nothing |> Py,
