@@ -19,13 +19,13 @@ end
 =#
 mps_avail = get(ENV, "JULIA_MACEMODELS_TEST_MPS", pyconvert(Bool, torch.backends.mps.is_built()))
 
-backends = ["cuda", "mps"] # ["cpu", "cuda", "mps"]
+backends = ["cpu", "cuda", "mps"] # ["cpu", "cuda", "mps"]
 backends_avail = [cuda_avail, mps_avail] # [true, cuda_avail, mps_avail]
 if cuda_avail
     using CUDA
 end
 if mps_avail
-    using MPS
+    using Metal
 end
 
 @info "Available PyTorch backends:" CUDA = cuda_avail MPS = mps_avail
