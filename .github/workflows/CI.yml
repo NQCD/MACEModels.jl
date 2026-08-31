@@ -44,15 +44,19 @@ jobs:
         env:
           JULIA_CONDAPKG_BACKEND: "Null"
           JULIA_PYTHONCALL_EXE: ${{ steps.python-install.outputs.python }} # Hardcode Python executable to the one  
+          JULIA_MACEMODELS_TEST_CUDA: 0
       - uses: julia-actions/cache@v2
         env: 
             JULIA_CONDAPKG_BACKEND: "Null"
             JULIA_PYTHONCALL_EXE: ${{ steps.python-install.outputs.python }} # Hardcode Python executable to the one  
+            JULIA_MACEMODELS_TEST_CUDA: 0
       - uses: julia-actions/julia-buildpkg@v1
         env: 
             JULIA_CONDAPKG_BACKEND: "Null"
             JULIA_PYTHONCALL_EXE: ${{ steps.python-install.outputs.python }} # Hardcode Python executable to the one  
+            JULIA_MACEMODELS_TEST_CUDA: 0
       - uses: julia-actions/julia-runtest@v1
         env: 
             JULIA_CONDAPKG_BACKEND: "Null"
             JULIA_PYTHONCALL_EXE: ${{ steps.python-install.outputs.python }} # Hardcode Python executable to the one  
+            JULIA_MACEMODELS_TEST_CUDA: 0
