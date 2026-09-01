@@ -11,13 +11,11 @@ model_path = "$(@__DIR__)/test_model/MACE_model_swa.model"
 
 @info "Checking PyTorch backends."
 torch = pyimport("torch")
-cuda_avail = get(ENV, "JULIA_MACEMODELS_TEST_CUDA", pyconvert(Bool, torch.backends.cuda.is_built()))
-#=
+cuda_avail = haskey(ENV, "JULIA_MACEMODELS_TEST_CUDA") ? parse(Bool, ENV["JULIA_MACEMODELS_TEST_CUDA"]) : pyconvert(Bool, torch.backends.cuda.is_built())
+mps_avail = haskey(ENV, "JULIA_MACEMODELS_TEST_METAL") ? parse(Bool, ENV["JULIA_MACEMODELS_TEST_METAL"]) : pyconvert(Bool, torch.backends.cuda.is_built())
 if cuda_avail
 	using CUDA
 end
-=#
-mps_avail = get(ENV, "JULIA_MACEMODELS_TEST_MPS", pyconvert(Bool, torch.backends.mps.is_built()))
 
 backends = ["cpu", "cuda", "mps"] # ["cpu", "cuda", "mps"]
 backends_avail = [true, cuda_avail, mps_avail] # [true, cuda_avail, mps_avail]
