@@ -326,10 +326,18 @@ function predict!(
             # Shorthand to route Arrays to correct device and torch representation.
             torch_tensor_device(x) = DLPack.share(mtx_to_device(x, M()), torch[].from_dlpack)
             # Combine together into a single graph in Torch representation by concatenating along the highest dimension.
+            # For loop expanded out to ensure since concatenation rules are inconsistent.
             the_batch = Dict{String, Py}()
-            for k in keys(batch_parts[1])
-                the_batch[k] = torch_tensor_device(cat([d[k] for d in batch_parts]...; dims=length(size(batch_parts[1][k]))))
-            end
+            the_batch["head"] = cat([d["head"] for d in batch_parts]...;dims = 1) |> torch_tensor_device
+            the_batch["cell"] = cat([d["cell"] for d in batch_parts]...;dims = 2) |> torch_tensor_device
+            the_batch["edge_index"] = cat([d["edge_index"] for d in batch_parts]...;dims = 1) |> torch_tensor_device
+            the_batch["energy"] = cat([d["energy"] for d in batch_parts]...;dims = 1) |> torch_tensor_device
+            the_batch["forces"] = cat([d["forces"] for d in batch_parts]...;dims = 2) |> torch_tensor_device
+            the_batch["node_attrs"] = cat([d["node_attrs"] for d in batch_parts]...;dims = 2) |> torch_tensor_device
+            the_batch["positions"] = cat([d["positions"] for d in batch_parts]...;dims = 2) |> torch_tensor_device
+            the_batch["shifts"] = cat([d["shifts"] for d in batch_parts]...;dims = 2) |> torch_tensor_device
+            the_batch["unit_shifts"] = cat([d["unit_shifts"] for d in batch_parts]...;dims = 2) |> torch_tensor_device
+            the_batch["weight"] = cat([d["weight"] for d in batch_parts]...;dims = 1) |> torch_tensor_device
             # Set batch and ptr information
             batch_idx_vector = vcat([repeat([N-1], length(at.masses)) for (N,at) in enumerate(atoms[structure_slices[batch_idx]])]...)
             the_batch["batch"] = batch_idx_vector |> torch_tensor_device # length Natoms * batch size, must be a torch.int type.
@@ -339,7 +347,7 @@ function predict!(
             # for k in keys(the_batch)
             #     println("Key: $k, PythonType: $(the_batch[k].dtype), TorchSize: $(the_batch[k].size()), TorchDevice: $(the_batch[k].device)")
             # end
-            n_batches > 1 ? println("Pointer start: $(force_slice_start), Pointer end: $(force_slice_end)") : nothing
+            # n_batches > 1 ? println("Pointer start: $(force_slice_start), Pointer end: $(force_slice_end)") : nothing
             # Evaluate each model
             for (model_index, model) in enumerate(mace_interface.models)
                 model_output = Py(model.forward(the_batch |> PyDict)) # Default kwargs specify training=false, compute_stress=false, compute_node_energy=false, these must be set to not mess things up.
@@ -455,7 +463,7 @@ Warning: This function does not respect mobileatoms constraints. Forces for froz
 """
 function get_forces_mean(mace_cache::MACEPredictionCache)
     mean_forces = dropdims(mean(austrip.(mace_cache.forces .* u"eV/Å"); dims=3); dims=3) # Force is given in eV/Å and returns in Hartree / Bohr
-    return length(mace_cache.ptr) == 2 ? mean_forces : [mean_forces[:, left:right] for (left:right) in zip(mace_cache.ptr[1:end-1], mace_cache.ptr[2:end])]
+    return length(mace_cache.ptr) == 2 ? mean_forces : [mean_forces[:, left:right] for (left,right) in zip(mace_cache.ptr[1:end-1], min(mace_cache.ptr[2:end], length(mace_cache.ptr)))]
 end
 
 """
