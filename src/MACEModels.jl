@@ -21,6 +21,8 @@ using UnitfulAtomic
 using NQCBase
 using Statistics
 using NQCModels: NQCModels
+using CUDA
+using StaticArrays
 
 const torch = Ref{Py}()
 const mace_data = Ref{Py}()
@@ -28,6 +30,7 @@ const mace_tools = Ref{Py}()
 const mace_cli = Ref{Py}()
 const numpy = Ref{Py}()
 const importlib_meta = Ref{Py}()
+const e3nn_util = Ref{Py}()
 
 function __init__()
     torch[] = pyimport("torch")
@@ -36,9 +39,10 @@ function __init__()
     mace_cli[] = pyimport("mace.cli")
     numpy[] = pyimport("numpy")
     importlib_meta[] = pyimport("importlib.metadata")
+    e3nn_util[] = pyimport("e3nn.util")
     # Output a warning if MACE or torch versions are unexpected.
-    expected_mace_version = v"0.3.14"
-    expected_torch_version = v"2.10.0"
+    expected_mace_version = v"0.3.16"
+    expected_torch_version = v"2.11.0"
     determined_mace_version = VersionNumber(pyconvert(String, importlib_meta[].version("mace-torch")))
     determined_torch_version = VersionNumber(pyconvert(String, importlib_meta[].version("torch")))
     for (pkg, exp, re) in zip(["mace-torch", "torch"], [expected_mace_version, expected_torch_version], [determined_mace_version, determined_torch_version])
@@ -55,12 +59,27 @@ This is used to speed up concurrent energy and force evaluations, as well as to 
 Use e.g. `get_energy_mean(MACEModel.last_eval_cache)` to access results of the last prediction made by the model.
 """
 mutable struct MACEPredictionCache{T}
-    energies::AbstractVector{<:AbstractVector{T}}
-    node_energy::AbstractVector{<:AbstractMatrix{T}}
-    forces::AbstractVector{<:AbstractArray{T,3}}
-    stress::AbstractVector{<:AbstractArray{T,3}}
+    energies::AbstractVector{<:AbstractVector{T}} # Model(Structure)
+    forces::AbstractArray{T,3} # nDOFs * (∑_batch natoms) * models
+    ptr::AbstractVector{Int} # n_structures + 1
     input_structures::AbstractVector
 end
+
+abstract type Device end
+struct CPUDevice <: Device end
+struct CUDADevice <: Device end
+struct MetalDevice <: Device end
+
+##  Move matrices to the correct device.
+# CPU --> CUDA
+mtx_to_device(mtx::AbstractArray, device::CUDADevice)::CuArray = CuArray(mtx)
+# CUDA --> CPU
+mtx_to_device(mtx::AnyCuArray, device::CPUDevice)::AbstractArray = Array(mtx)
+# CPU --> CPU
+mtx_to_device(mtx::AbstractArray, device::CPUDevice)::AbstractArray = mtx
+# CUDA --> CUDA
+mtx_to_device(mtx::AnyCuArray, device::CUDADevice)::AbstractArray = mtx
+
 
 """
 MACE interface with support for ensemble of models and batch size selection for potentially faster inference.
@@ -81,16 +100,18 @@ DOFs currently hardcoded at 3.
 - `ndofs::Int`: Number of degrees of freedom in the system.
 - `mobile_atoms::Vector{Int}`: Indices of mobile atoms in the system.
 """
-struct MACEModel{T} <: NQCModels.ClassicalModels.ClassicalModel
+struct MACEModel{T, D, M} <: NQCModels.ClassicalModels.ClassicalModel
     model_paths::Vector{String}
     models::Vector
     device::Vector{String}
     torch_dtype::Py
     default_dtype::T
-    batch_size::Union{Int,Nothing}
+    dynamics_device::D
+    model_device::M
+    batch_size::Int
     cutoff_radius::AbstractFloat
     last_eval_cache::MACEPredictionCache
-    z_table
+    atom_types::Vector{Int}
     atoms::Atoms
     cell::AbstractCell
     ndofs::Int
@@ -142,35 +163,44 @@ function MACEModel(
     mobile_atoms::Vector{Int}=collect(1:length(atoms)),
     use_CuEquivariance::Bool=false,
     use_OpenEquivariance::Bool=false,
+    dynamics_on::Device = CPUDevice(),
 )
     # Assign device to all models if only one device is given
     isa(device, String) ? device = [device for _ in 1:length(model_paths)] : nothing
-    # Check selected device types are available
+    # Check selected device types are available and assign model_device
+    model_device = nothing
     for dev in device
         if split(dev, ":")[1] == "cuda"
             if pyconvert(Bool, torch[].backends.cuda.is_built())
                 @debug "CUDA device available, using GPU."
+                model_device = CUDADevice()
             else
                 @warn "CUDA device not available, falling back to CPU."
                 dev = "cpu"
+                model_device = CPUDevice()
             end
             if length(split(dev, ":")) == 2
                 @warn "Running on a selected GPU is currently unsupported. Falling back to cuda:0. See https://github.com/NQCD/MACEModels.jl/issues/13 for more information"
                 dev = "cuda:0"
+                model_device = CUDADevice()
             end
         elseif dev == "mps"
             if pyconvert(Bool, torch[].backends.mps.is_built())
                 @debug "MPS device available, using GPU."
+                model_device = MetalDevice()
             else
                 @warn "MPS device not available, falling back to CPU."
                 dev = "cpu"
+                model_device = CPUDevice()
             end
         else
             @debug "CPU selected as torch.device"
             dev = "cpu"
+            model_device = CPUDevice()
         end
     end
     # Set default dtype for torch
+    # Conversion from Julia dtypes to PyTorch dtypes.
     dtypes_julia_python = Dict{Type,Any}(Float32 => torch[].float32, Float64 => torch[].float64)
     torch_dtype = dtypes_julia_python[default_dtype]
     torch[].set_default_dtype(torch_dtype)
@@ -179,10 +209,11 @@ function MACEModel(
     models = []
     for (i, file_path) in enumerate(model_paths)
         try
-            model = torch[].load(f=file_path, map_location=device[i], weights_only=false)
+            model = torch[].load(f=file_path, map_location=device[i] , weights_only=false)
             model = model.to(device[i])
             model = use_CuEquivariance ? mace_cli.convert_e3nn_cueq.run(model, device=device[i]).to(device) : model
             model = use_OpenEquivariance ? mace_cli.convert_e3nn_oeq.run(model, device=device[i]).to(device) : model
+            model = e3nn_util[].jit.compile(model)
             # Check if any rogue atoms contained in base structure
             any(sort(unique(atoms.numbers)) ∉ Vector(from_dlpack(model.atomic_numbers.contiguous()))) || throw(ArgumentError("Example structure contains atom types not present in MACE model $(i)."))
             # Model is safe to add to ensemble
@@ -202,7 +233,7 @@ function MACEModel(
 
     # Build z-table
     # Hardcoding this to the model so we can handle input structures using a subset of all learned atom types.
-    z_table = mace_tools[].utils.AtomicNumberTable(Vector(from_dlpack(models[1].atomic_numbers.contiguous())))
+    atom_numbers = Vector(from_dlpack(models[1].atomic_numbers.contiguous()))
 
     # Freeze parameters
     for model in models
@@ -213,14 +244,13 @@ function MACEModel(
 
     # Initialise an evaluation cache
     starter_mace_cache = MACEPredictionCache(
-        [[convert(default_dtype, 1.0)]], # Energies
-        [hcat(convert(default_dtype, 1.0))], # Node energies
-        [[convert(default_dtype, 1.0);;;]], # Forces
-        [[convert(default_dtype, 1.0);;;]], # Stresses
-        [], # Input structures
+        mtx_to_device([[convert(default_dtype, 1.0)]], dynamics_on), # Energies
+        mtx_to_device([convert(default_dtype, 1.0);;;], dynamics_on), # Forces
+        mtx_to_device([0,1], dynamics_on), # Pointer
+        mtx_to_device([[convert(default_dtype, 1.0);;]], dynamics_on), # Structures
     )
 
-    return MACEModel(model_paths, models, device, torch_dtype, default_dtype, batch_size, cutoff_radius, starter_mace_cache, z_table, atoms, cell, 3, mobile_atoms)
+    return MACEModel(model_paths, models, device, torch_dtype, default_dtype(1.0), dynamics_on, model_device, batch_size, cutoff_radius, starter_mace_cache, atom_numbers, atoms, cell, 3, mobile_atoms)
 end
 
 function Base.show(io::IO, model::MACEModel)
@@ -232,60 +262,7 @@ function Base.show(io::IO, model::MACEModel)
     )
 end
 
-"""
-    mace_configuration_from_nqcd_configuration(
-    atoms::Atoms,
-    cell::Union{InfiniteCell, PeriodicCell},
-    R::AbstractMatrix,
-)
-
-Converter into a single mace.data.utils.Configuration to make use of MACE's data loading.
-"""
-function mace_configuration_from_nqcd_configuration(
-    atoms::Atoms,
-    cell::AbstractCell,
-    R::AbstractMatrix;
-    dtype::Type=Float64,
-    head_name::String="Default"
-)
-    #! Removed positions type conversion to check if it affects prediction
-    if isa(cell, InfiniteCell)
-        pbc = zeros(Bool, size(R, 1))
-        cell_array = zeros(dtype, size(R, 1), size(R, 1))
-    elseif isa(cell, PeriodicCell)
-        pbc = cell.periodicity
-        cell_array = permutedims(Matrix{eltype(R)}(ustrip.(auconvert.(u"Å", cell.vectors))), (2, 1))
-    end
-
-    ase_positions = permutedims(ustrip.(auconvert.(u"Å", R)), (2, 1))
-
-    config = mace_data[].utils.Configuration(
-        atomic_numbers=PyList(atoms.numbers), # needs to be a list
-        positions=numpy[].array(ase_positions), # Convert from atomic units to Ångström
-        properties=Dict{String,Any}(
-            "energy" => Py(zero(eltype(R))), # scalar
-            "forces" => numpy[].array(zeros(eltype(R), size(R'))), # N_atoms * N_dofs
-            #     "stress" => pybuiltins.None,
-            #     "virials" => pybuiltins.None,
-            #     "dipole" => pybuiltins.None,
-            #     "charges" => pybuiltins.None,
-        ),
-        head=Py("Default"),
-        weight=Py(one(eltype(R))),
-        property_weights=Dict(
-        #    "energy_weight" => Py(one(eltype(R))),
-        #    "forces_weight" => Py(one(eltype(R))),
-        #    "stress_weight" => Py(one(eltype(R))),
-        #    "virials_weight" => Py(one(eltype(R))),
-        ),
-        config_type=Py("Default"),
-        pbc=Py(pbc),
-        cell=numpy[].array(cell_array),
-    )
-    return Py(config)
-end
-
-# ToDo: Evaluation function that handles model evaluation and caching of results.
+include("mace_structures.jl")
 
 """
     predict!(
@@ -312,54 +289,75 @@ Can be either a vector of different Atoms objects or a single Atoms object.
 Can be either a vector of different Cell objects or a single Cell object.
 """
 function predict!(
-    mace_interface::MACEModel,
+    mace_interface::MACEModel{T,D,M},
     atoms::Union{Vector{<:Atoms},Atoms},
     R::Vector{<:AbstractMatrix},
     cell::Union{Vector{<:AbstractCell},AbstractCell},
-)
+) where {T,D,M}
     # Reset default dtype for torch in case using another model changed it.
     torch[].set_default_dtype(mace_interface.torch_dtype)
 
     if R != mace_interface.last_eval_cache.input_structures # Only predict if working on new structures
-        dataset = Vector{Any}(undef, length(R))
+        n_batches = length(R) / mace_interface.batch_size |> ceil |> Int # Number of batches to pass through MACE. ≥ 1
+        structure_slices = Iterators.partition(1:length(R), mace_interface.batch_size) |> collect
+
+        # atoms and cell must always be vectors for each structure.
         isa(cell, AbstractCell) ? cell = [cell for _ in 1:length(R)] : nothing # Always have atoms, positions and cell for each structure
         isa(atoms, Atoms) ? atoms = [atoms for _ in 1:length(R)] : nothing
-        for i in eachindex(R)
-            config = mace_configuration_from_nqcd_configuration(atoms[i], cell[i], R[i]; dtype=mace_interface.default_dtype)
-            dataset[i] = mace_data[].AtomicData.from_config(config, mace_interface.z_table, mace_interface.cutoff_radius)
-        end
-        # Initialise DataLoader
-        batch_size = mace_interface.batch_size === nothing ? length(dataset) : mace_interface.batch_size # Ensure there is a batch size
-        mace_DataLoader = mace_tools[].torch_geometric.dataloader.DataLoader(
-            dataset=dataset,
-            batch_size=batch_size,
-            shuffle=false,
-            drop_last=false,
-        )
+
         # Allocate results arrays for prediction
         mace_interface.last_eval_cache.input_structures = deepcopy(R)
-        mace_interface.last_eval_cache.energies = [zeros(mace_interface.default_dtype, length(mace_interface.models)) for i in eachindex(R)]
-        mace_interface.last_eval_cache.forces = [zeros(mace_interface.default_dtype, mace_interface.ndofs, length(atoms[i]), length(mace_interface.models)) for i in eachindex(R)]
+        mace_interface.last_eval_cache.energies = [mtx_to_device(zeros(T, length(R)), D()) for i in eachindex(mace_interface.models)]
+        full_ptr = vcat(1, [length(at.masses) for at in atoms])|> cumsum
+        mace_interface.last_eval_cache.ptr = mtx_to_device(full_ptr, D())
+        mace_interface.last_eval_cache.forces = mtx_to_device(zeros(T, mace_interface.ndofs, sum([length(at) for at in atoms]), length(mace_interface.models)), D())
+        force_slice_start = full_ptr[1]
+        force_slice_end = full_ptr[min(mace_interface.batch_size, length(R))+1]-1
 
-
-        # Iterate through dataloader and evaluate each model
-        for (batch_index, batch) in enumerate(mace_DataLoader)
-            evalcache_index = (batch_index - 1) * batch_size # Pointer to the start of the batch in the output arrays
+        # For each batch that needs running, build the corresponding graph(s).
+        for batch_idx in 1:n_batches
+            # Since all models must be on the same GPU, the dict can be reused across models.
+            batch_parts = [to_julia_dict(
+                mace_interface,
+                atoms[structure_idx],
+                R[structure_idx],
+                cell[structure_idx],
+            ) for structure_idx in structure_slices[batch_idx]]
+            # Shorthand to route Arrays to correct device and torch representation.
+            torch_tensor_device(x) = DLPack.share(mtx_to_device(x, M()), torch[].from_dlpack)
+            # Combine together into a single graph in Torch representation by concatenating along the highest dimension.
+            # For loop expanded out to ensure since concatenation rules are inconsistent.
+            the_batch = Dict{String, Py}()
+            the_batch["head"] = cat([d["head"] for d in batch_parts]...;dims = 1) |> torch_tensor_device
+            the_batch["cell"] = cat([d["cell"] for d in batch_parts]...;dims = 2) |> torch_tensor_device
+            the_batch["edge_index"] = cat([d["edge_index"] for d in batch_parts]...;dims = 1) |> torch_tensor_device
+            the_batch["energy"] = cat([d["energy"] for d in batch_parts]...;dims = 1) |> torch_tensor_device
+            the_batch["forces"] = cat([d["forces"] for d in batch_parts]...;dims = 2) |> torch_tensor_device
+            the_batch["node_attrs"] = cat([d["node_attrs"] for d in batch_parts]...;dims = 2) |> torch_tensor_device
+            the_batch["positions"] = cat([d["positions"] for d in batch_parts]...;dims = 2) |> torch_tensor_device
+            the_batch["shifts"] = cat([d["shifts"] for d in batch_parts]...;dims = 2) |> torch_tensor_device
+            the_batch["unit_shifts"] = cat([d["unit_shifts"] for d in batch_parts]...;dims = 2) |> torch_tensor_device
+            the_batch["weight"] = cat([d["weight"] for d in batch_parts]...;dims = 1) |> torch_tensor_device
+            # Set batch and ptr information
+            batch_idx_vector = vcat([repeat([N-1], length(at.masses)) for (N,at) in enumerate(atoms[structure_slices[batch_idx]])]...)
+            the_batch["batch"] = batch_idx_vector |> torch_tensor_device # length Natoms * batch size, must be a torch.int type.
+            ptr = vcat(1, [length(atoms[st_idx]) for st_idx in structure_slices[batch_idx]]) |> cumsum
+            the_batch["ptr"] = ptr .-1 |> torch_tensor_device # length batch size + 1, must be a torch.int type.
+            # Now the batch should be set up correctly.
+            # for k in keys(the_batch)
+            #     println("Key: $k, PythonType: $(the_batch[k].dtype), TorchSize: $(the_batch[k].size()), TorchDevice: $(the_batch[k].device)")
+            # end
+            # n_batches > 1 ? println("Pointer start: $(force_slice_start), Pointer end: $(force_slice_end)") : nothing
+            # Evaluate each model
             for (model_index, model) in enumerate(mace_interface.models)
-                # Place copy of batch on model device
-                clone = batch.clone().to(mace_interface.device[model_index])
-                # Evaluate model
-                model_output = Py(model(clone.to_dict(), compute_stress=false))
-                # Split according to batching
-                #! Check how well this performs and whether this actually saves memory
-                energies = Array(from_dlpack(model_output["energy"].contiguous().detach()))
-                forces = Array(from_dlpack(model_output["forces"].contiguous().detach()))
-                splitting = Array(from_dlpack(clone.ptr.contiguous().detach())) .+ 1 # Array of batch item bounds in output arrays, +1 due to Julia-Python conversion
-                for structure_index in 2:length(splitting)
-                    mace_interface.last_eval_cache.energies[evalcache_index+structure_index-1][model_index] = energies[structure_index-1]
-                    mace_interface.last_eval_cache.forces[evalcache_index+structure_index-1][:, :, model_index] .= forces[:, splitting[structure_index-1]:splitting[structure_index]-1] # last index -1 because Julia includes last index in a slice
-                end
+                model_output = Py(model.forward(the_batch |> PyDict)) # Default kwargs specify training=false, compute_stress=false, compute_node_energy=false, these must be set to not mess things up.
+                # Shared memory refs to the model outputs.
+                # These need moving to the CPU for now due to scalar indexing. I need to think about how to solve this separately.
+                mace_interface.last_eval_cache.energies[model_index] = mtx_to_device(from_dlpack(model_output["energy"].contiguous().detach()), D())
+                mace_interface.last_eval_cache.forces[:,force_slice_start:force_slice_end,model_index] .= mtx_to_device(from_dlpack(model_output["forces"].contiguous().detach()), D())
             end
+            force_slice_start = batch_idx < n_batches ? full_ptr[batch_idx*mace_interface.batch_size+1] : force_slice_start
+            force_slice_end = batch_idx < n_batches ? full_ptr[min((batch_idx+1)*mace_interface.batch_size, length(R))+1]-1 : force_slice_end
         end
     end
 end
@@ -408,12 +406,14 @@ Returns the mean potential energy of the structures stored in the evaluation cac
 Energy is returned in units of **Hartree**.
 """
 function get_energy_mean(mace_cache::MACEPredictionCache)
-    mean_energies = zeros(eltype(mace_cache.energies[1]), length(mace_cache.energies))
-    for index in eachindex(mace_cache.energies)
-        mean_energies[index] = mean(austrip.(mace_cache.energies[index] .* u"eV")) # Energy is given in eV
+    mean_energies = zero(mace_cache.energies[1])
+    N = length(mace_cache.energies)
+    for index in 1:N
+        mean_energies .+= austrip.(mace_cache.energies[index] .* u"eV") # Energy is given in eV
     end
+    mean_energies ./= N
     if length(mean_energies) == 1
-        return mean_energies[1]
+        return Array(mean_energies) |> first
     else
         return mean_energies # Return in Hartree
     end
@@ -425,10 +425,11 @@ end
 Returns the variance of the potential energy in **Hartree²**.
 """
 function get_energy_variance(mace_cache::MACEPredictionCache)
-    mean_energies = zeros(eltype(mace_cache.energies[1]), length(mace_cache.energies))
+    mean_energies = zeros(eltype(mace_cache.energies[1]), length(mace_cache.energies[1]), length(mace_cache.energies))
     for index in eachindex(mace_cache.energies)
-        mean_energies[index] = var(austrip.(mace_cache.energies[index] .* u"eV")) # Energy is given in eV
+        mean_energies[:, index] .= mace_cache.energies[index]
     end
+    mean_energies .= dropdims(var(austrip.(mean_energies .* u"eV"); dims=2); dims=2) # Energy is given in eV
     if length(mean_energies) == 1
         return mean_energies[1]
     else
@@ -442,12 +443,12 @@ end
 Returns the potential energy evaluated by each model in the ensemble in units of **Hartree**.
 """
 function get_energy_ensemble(mace_cache::MACEPredictionCache)
-    ensemble_energies = Vector{typeof(mace_cache.energies[1])}(undef, length(mace_cache.energies))
+    ensemble_energies = zeros(eltype(mace_cache.energies[1], length(mace_cache.energies), length(mace_cache.energies[1])))
     for index in eachindex(mace_cache.energies)
-        ensemble_energies[index] = @. austrip(mace_cache.energies[index] * u"eV") # Energy is given in eV
+        ensemble_energies[index, :] = @. austrip(mace_cache.energies[index] * u"eV") # Energy is given in eV
     end
-    if length(ensemble_energies) == 1
-        return ensemble_energies[1]
+    if size(ensemble_energies, 2) == 1
+        return ensemble_energies[:,1]
     else
         return ensemble_energies # Return in Hartree
     end
@@ -461,18 +462,8 @@ Forces are returned in units of **Hartree/Bohr**.
 Warning: This function does not respect mobileatoms constraints. Forces for frozen atoms must be manually set to 0
 """
 function get_forces_mean(mace_cache::MACEPredictionCache)
-    mean_forces = Vector{Matrix{eltype(mace_cache.forces[1])}}(undef, length(mace_cache.forces))
-    for index in eachindex(mace_cache.forces)
-        mean_forces[index] = dropdims(mean(austrip.(mace_cache.forces[index] .* u"eV/Å"); dims=3); dims=3) # Force is given in eV/Å
-        if sum(abs.(mean_forces[index])) ≥ 0.1
-            @debug "Large forces detected in structure $(index)." forces = mean_forces[index] input_structures = mace_cache.input_structures[index]
-        end
-    end
-    if length(mean_forces) == 1
-        return mean_forces[1]
-    else
-        return mean_forces # Return in Hartree / Bohr
-    end
+    mean_forces = dropdims(mean(austrip.(mace_cache.forces .* u"eV/Å"); dims=3); dims=3) # Force is given in eV/Å and returns in Hartree / Bohr
+    return length(mace_cache.ptr) == 2 ? mean_forces : [mean_forces[:, left:right] for (left,right) in zip(mace_cache.ptr[1:end-1], min(mace_cache.ptr[2:end], length(mace_cache.ptr)))]
 end
 
 """
@@ -483,15 +474,8 @@ Forces are returned in units of **Hartree²/Bohr²**.
 Warning: This function does not respect mobileatoms constraints. Forces for frozen atoms must be manually set to 0
 """
 function get_forces_variance(mace_cache::MACEPredictionCache)
-    mean_forces = Vector{Matrix{eltype(mace_cache.forces[1])}}(undef, length(mace_cache.forces))
-    for index in eachindex(mace_cache.forces)
-        mean_forces[index] = dropdims(var(austrip.(mace_cache.forces[index] .* u"eV/Å"); dims=3); dims=3) # Force is given in eV/Å
-    end
-    if length(mean_forces) == 1
-        return mean_forces[1]
-    else
-        return mean_forces # Return in Hartree / Bohr^2
-    end
+    var_forces = dropdims(var(austrip.(mace_cache.forces .* u"eV/Å"); dims=3); dims=3) # Force is given in eV/Å and returns in Hartree / Bohr
+    return length(mace_cache.ptr) == 2 ? var_forces : [var_forces[:, left:right] for (left:right) in zip(mace_cache.ptr[1:end-1], mace_cache.ptr[2:end])]
 end
 
 """
@@ -502,15 +486,7 @@ Returns the forces evaluated by each model in the ensemble in units of **Hartree
 Warning: This function does not respect mobileatoms constraints. Forces for frozen atoms must be manually set to 0
 """
 function get_forces_ensemble(mace_cache::MACEPredictionCache)
-    ensemble_forces = Vector{typeof(mace_cache.forces[1])}(undef, length(mace_cache.forces))
-    for index in eachindex(mace_cache.forces)
-        ensemble_forces[index] = permutedims(austrip.(mace_cache.forces[index] .* u"eV/Å"), (2, 1, 3)) # Force is given in eV/Å
-    end
-    if length(ensemble_forces) == 1
-        return ensemble_forces[1]
-    else
-        return ensemble_forces # Return in Hartree / Bohr
-    end
+    return austrip.(mace_cache.forces .* u"eV/Å")
 end
 
 # ToDo: Potential and derivative for a single structure
