@@ -59,10 +59,10 @@ This is used to speed up concurrent energy and force evaluations, as well as to 
 Use e.g. `get_energy_mean(MACEModel.last_eval_cache)` to access results of the last prediction made by the model.
 """
 mutable struct MACEPredictionCache{T}
-    energies::AbstractVector{<:AbstractVector{T}} # Model(Structure)
+    energies::AbstractMatrix{T} # (Structures, models)
     forces::AbstractArray{T,3} # nDOFs * (∑_batch natoms) * models
     ptr::AbstractVector{Int} # n_structures + 1
-    input_structures::AbstractVector
+    input_structures::AbstractVector # [(nDOFs, n_atoms)]
 end
 
 abstract type Device end
@@ -145,8 +145,7 @@ NQCModels.mobileatoms(model::MACEModel, n::Int) = model.mobile_atoms # Return al
 Interface to MACE machine learning interatomic potentials with support for ensemble of models and batch size selection for potentially faster inference.
 
 # Arguments
-- `atoms`: Atoms object for the system. `predict!` can be called with a Vector of different Atoms objects to evaluate different structures.
-- `cell`: Cell object for the system. `predict!` can be called with a Vector of different Cell objects to evaluate different structures.
+- `structure`: Structure prototype to use in cases where the specific atoms and cells to use aren't supplied. Also used to trigger compilation.
 - `model_paths::Vector{String}`: Model paths to load. If multiple paths are given, an ensemble of models is used and mean energies/forces used to propagate dynamics.
 - `device::Union{String, Vector{String}}`: Device to use for inference. If a single device is given, all models will be loaded on that device. If multiple devices are given, each model will be loaded on the corresponding device. Default is `"cpu"`.
 - `default_dtype::Type`: Default data type for PyTorch (usually Float32)
@@ -154,16 +153,16 @@ Interface to MACE machine learning interatomic potentials with support for ensem
 - `mobile_atoms::Vector{Int}`: Indices of mobile atoms in the system. Default is all atoms.
 """
 function MACEModel(
-    atoms::Atoms,
-    cell::AbstractCell,
+    structure::NQCBase.Structure,
     model_paths::Vector{String};
     device::Union{String,Vector{String}}="cpu",
     default_dtype::Type=Float32, # for better compatibility
     batch_size::Int=1,
-    mobile_atoms::Vector{Int}=collect(1:length(atoms)),
+    mobile_atoms::Vector{Int}=collect(1:length(structure.atoms)),
     use_CuEquivariance::Bool=false,
     use_OpenEquivariance::Bool=false,
     dynamics_on::Device = CPUDevice(),
+    compile::Bool = true,
 )
     # Assign device to all models if only one device is given
     isa(device, String) ? device = [device for _ in 1:length(model_paths)] : nothing
@@ -211,11 +210,17 @@ function MACEModel(
         try
             model = torch[].load(f=file_path, map_location=device[i] , weights_only=false)
             model = model.to(device[i])
-            model = use_CuEquivariance ? mace_cli.convert_e3nn_cueq.run(model, device=device[i]).to(device) : model
-            model = use_OpenEquivariance ? mace_cli.convert_e3nn_oeq.run(model, device=device[i]).to(device) : model
-            model = e3nn_util[].jit.compile(model)
+            if use_CuEquivariance || use_OpenEquivariance
+                @info "Applying (Cu|Open)Equivariance conversion if activated."
+                model = use_CuEquivariance ? mace_cli.convert_e3nn_cueq.run(model, device=device[i]).to(device) : model
+                model = use_OpenEquivariance ? mace_cli.convert_e3nn_oeq.run(model, device=device[i]).to(device) : model
+            end
+            if compile
+                @info "JIT-compiling the model"
+                model = e3nn_util[].jit.compile(model)
+            end
             # Check if any rogue atoms contained in base structure
-            any(sort(unique(atoms.numbers)) ∉ Vector(from_dlpack(model.atomic_numbers.contiguous()))) || throw(ArgumentError("Example structure contains atom types not present in MACE model $(i)."))
+            any(sort(unique(structure.atoms.numbers)) ∉ Vector(from_dlpack(model.atomic_numbers.contiguous()))) || throw(ArgumentError("Example structure contains atom types not present in MACE model $(i)."))
             # Model is safe to add to ensemble
             push!(models, model)
         catch e
@@ -244,13 +249,29 @@ function MACEModel(
 
     # Initialise an evaluation cache
     starter_mace_cache = MACEPredictionCache(
-        mtx_to_device([[convert(default_dtype, 1.0)]], dynamics_on), # Energies
+        mtx_to_device([convert(default_dtype, 1.0);;], dynamics_on), # Energies
         mtx_to_device([convert(default_dtype, 1.0);;;], dynamics_on), # Forces
         mtx_to_device([0,1], dynamics_on), # Pointer
         mtx_to_device([[convert(default_dtype, 1.0);;]], dynamics_on), # Structures
     )
 
-    return MACEModel(model_paths, models, device, torch_dtype, default_dtype(1.0), dynamics_on, model_device, batch_size, cutoff_radius, starter_mace_cache, atom_numbers, atoms, cell, 3, mobile_atoms)
+    return MACEModel(
+        model_paths,
+        models,
+        device,
+        torch_dtype,
+        default_dtype(1.0),
+        dynamics_on,
+        model_device,
+        batch_size,
+        cutoff_radius,
+        starter_mace_cache,
+        atom_numbers,
+        structure.atoms,
+        structure.cell,
+        3,
+        mobile_atoms
+    )
 end
 
 function Base.show(io::IO, model::MACEModel)
@@ -399,7 +420,37 @@ function predict(
     return deepcopy(mace_interface.last_eval_cache)
 end
 
+# NQCBase.Structure dispatching version
+function predict!(
+    mace_interface::MACEModel{T,D,M},
+    structures::Vector{<:NQCBase.Structure}
+) where {T,D,M}
+    predict!(
+        mace_interface,
+        [s.atoms for s in structures],
+        [s.positions for s in structures],
+        [s.cell for s in structures],
+    )
+end
+
+# NQCBase.Structure dispatching version
+function predict(
+    mace_interface::MACEModel{T,D,M},
+    structures::Vector{<:NQCBase.Structure},
+) where {T,D,M}
+    predict(
+        mace_interface,
+        [s.atoms for s in structures],
+        [s.positions for s in structures],
+        [s.cell for s in structures],
+    )
+end
+
+
 # Methods using MACEPredictionCache that convert MACE outputs to NQCD's atomic unit scheme. Snip length 1 caches to the basic outputs instead of unnecessary vector wrapping.
+
+# Convenience function for converting out of atomic units.
+auconvertstrip(unit, x) = ustrip(auconvert(unit, x))
 
 """
     get_energy_mean(mace_cache::MACEPredictionCache)
@@ -409,17 +460,14 @@ Returns the mean potential energy of the structures stored in the evaluation cac
 Energy is returned in units of **Hartree**.
 """
 function get_energy_mean(mace_cache::MACEPredictionCache)
-    mean_energies = zero(mace_cache.energies[1])
-    N = length(mace_cache.energies)
-    for index in 1:N
-        mean_energies .+= austrip.(mace_cache.energies[index] .* u"eV") # Energy is given in eV
-    end
-    mean_energies ./= N
-    if length(mean_energies) == 1
-        return Array(mean_energies) |> first
-    else
-        return mean_energies # Return in Hartree
-    end
+    return ifelse(
+        size(mace_cache.energies, 1) == 1, # Single structure case, output scalar directly.
+        mean(mace_cache.energies) * austrip(1.0u"eV"),
+        dropdims( # Reduce
+            mean(mace_cache.energies; dims = 2);
+            dims = 2
+        ) .* austrip(1.0u"eV")
+    )
 end
 
 """
@@ -428,33 +476,24 @@ end
 Returns the variance of the potential energy in **Hartree²**.
 """
 function get_energy_variance(mace_cache::MACEPredictionCache)
-    mean_energies = zeros(eltype(mace_cache.energies[1]), length(mace_cache.energies[1]), length(mace_cache.energies))
-    for index in eachindex(mace_cache.energies)
-        mean_energies[:, index] .= mace_cache.energies[index]
-    end
-    mean_energies .= dropdims(var(austrip.(mean_energies .* u"eV"); dims=2); dims=2) # Energy is given in eV
-    if length(mean_energies) == 1
-        return mean_energies[1]
-    else
-        return mean_energies # Return in Hartree^2
-    end
+    return ifelse(
+        size(mace_cache.energies, 1) == 1, # Single structure case, output scalar directly.
+        var(mace_cache.energies) * austrip(1.0u"eV"),
+        dropdims( # Reduce
+            var(mace_cache.energies; dims = 2);
+            dims = 2
+        ) .* austrip(1.0u"eV")
+    )
 end
 
 """
     get_energy_ensemble(mace_cache::MACEPredictionCache)
 
 Returns the potential energy evaluated by each model in the ensemble in units of **Hartree**.
+The output matrix has the shape (N_structures, N_models)
 """
 function get_energy_ensemble(mace_cache::MACEPredictionCache)
-    ensemble_energies = zeros(eltype(mace_cache.energies[1], length(mace_cache.energies), length(mace_cache.energies[1])))
-    for index in eachindex(mace_cache.energies)
-        ensemble_energies[index, :] = @. austrip(mace_cache.energies[index] * u"eV") # Energy is given in eV
-    end
-    if size(ensemble_energies, 2) == 1
-        return ensemble_energies[:,1]
-    else
-        return ensemble_energies # Return in Hartree
-    end
+    return mace_cache.energies .* austrip(1.0u"eV")
 end
 
 """
@@ -466,7 +505,13 @@ Warning: This function does not respect mobileatoms constraints. Forces for froz
 """
 function get_forces_mean(mace_cache::MACEPredictionCache)
     mean_forces = dropdims(mean(austrip.(mace_cache.forces .* u"eV/Å"); dims=3); dims=3) # Force is given in eV/Å and returns in Hartree / Bohr
-    return length(mace_cache.ptr) == 2 ? mean_forces : [mean_forces[:, left:right] for (left,right) in zip(mace_cache.ptr[1:end-1], min(mace_cache.ptr[2:end], length(mace_cache.ptr)))]
+    return ifelse(
+        length(mace_cache.ptr) == 2, # 2-entry pointer means one structure, just return the full array.
+        mean_forces,
+        [
+            mean_forces[:, left:right-1] for (left, right) in zip(mace_cache.ptr[1:end-1], mace_cache.ptr[2:end])
+            ],
+    )
 end
 
 """
@@ -478,7 +523,13 @@ Warning: This function does not respect mobileatoms constraints. Forces for froz
 """
 function get_forces_variance(mace_cache::MACEPredictionCache)
     var_forces = dropdims(var(austrip.(mace_cache.forces .* u"eV/Å"); dims=3); dims=3) # Force is given in eV/Å and returns in Hartree / Bohr
-    return length(mace_cache.ptr) == 2 ? var_forces : [var_forces[:, left:right] for (left:right) in zip(mace_cache.ptr[1:end-1], mace_cache.ptr[2:end])]
+    return ifelse(
+        length(mace_cache.ptr) == 2, # 2-entry pointer means one structure, just return the full array.
+        var_forces,
+        [
+            var_forces[:, left:right-1] for (left, right) in zip(mace_cache.ptr[1:end-1], mace_cache.ptr[2:end])
+            ],
+    )
 end
 
 """
@@ -489,7 +540,13 @@ Returns the forces evaluated by each model in the ensemble in units of **Hartree
 Warning: This function does not respect mobileatoms constraints. Forces for frozen atoms must be manually set to 0
 """
 function get_forces_ensemble(mace_cache::MACEPredictionCache)
-    return austrip.(mace_cache.forces .* u"eV/Å")
+    return ifelse(
+        length(mace_cache.ptr) == 2, # 2-entry pointer means one structure, just return the full array.
+        var_forces,
+        [
+            var_forces[:, left:right-1, :] .* austrip(1.0u"eV/Å") for (left, right) in zip(mace_cache.ptr[1:end-1], mace_cache.ptr[2:end])
+            ],
+    )
 end
 
 # ToDo: Potential and derivative for a single structure
@@ -544,14 +601,8 @@ This variant of `NQCModels.derivative` can make use of batch evaluation to speed
 inference for multiple structures.
 """
 function NQCModels.derivative(model::MACEModel, atoms::Atoms, R::Vector{<:AbstractMatrix}, cell::Union{InfiniteCell,PeriodicCell})
-    # Evaluate model
     D = zeros(eltype(R), size(R))
-    predict!(model, atoms, R, cell)
-    # Return derivative (mean is trivial)
-    D_full = get_forces_mean(model.last_eval_cache)
-    for i in axes(D, 3)
-        D[i][:, model.mobile_atoms] .-= @views D_full[i][:, model.mobile_atoms]
-    end
+    NQCModels.derivative!(model, atoms, D, R, cell)
     return D
 end
 

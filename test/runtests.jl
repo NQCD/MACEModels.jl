@@ -12,7 +12,7 @@ model_path = "$(@__DIR__)/test_model/MACE_model_swa.model"
 @info "Checking PyTorch backends."
 torch = pyimport("torch")
 cuda_avail = haskey(ENV, "JULIA_MACEMODELS_TEST_CUDA") ? parse(Bool, ENV["JULIA_MACEMODELS_TEST_CUDA"]) : pyconvert(Bool, torch.backends.cuda.is_built())
-mps_avail = haskey(ENV, "JULIA_MACEMODELS_TEST_METAL") ? parse(Bool, ENV["JULIA_MACEMODELS_TEST_METAL"]) : pyconvert(Bool, torch.backends.cuda.is_built())
+mps_avail = haskey(ENV, "JULIA_MACEMODELS_TEST_METAL") ? parse(Bool, ENV["JULIA_MACEMODELS_TEST_METAL"]) : pyconvert(Bool, torch.backends.mps.is_built())
 if cuda_avail
 	using CUDA
 end
@@ -50,8 +50,7 @@ for device_string in backends[backends_avail] # Select backends to test based on
     @testset "Model loading ($(device_string))" begin
         # Write your tests here.
         model = MACEModel(
-                structures[1].atoms,
-                structures[1].cell,
+                structures[1],
                 [model_path];
                 default_dtype=Float32,
                 device=device_string
@@ -62,8 +61,7 @@ for device_string in backends[backends_avail] # Select backends to test based on
 
     @testset "Model inference ($(device_string))" begin
         model = MACEModel(
-            structures[1].atoms,
-            structures[1].cell,
+            structures[1],
             [model_path];
             default_dtype=Float32,
             device=device_string,
@@ -72,9 +70,7 @@ for device_string in backends[backends_avail] # Select backends to test based on
         @info "Evaluating structures using MACEModels.predict!()"
         mace_prediction = @time MACEModels.predict(
             model,
-            [s.atoms for s in structures_to_test],
-            [s.positions for s in structures_to_test],
-            [s.cell for s in structures_to_test],
+            structures_to_test,
         )
         energies_macemodels = MACEModels.get_energy_mean(mace_prediction)
         forces_macemodels = MACEModels.get_forces_mean(mace_prediction)
@@ -83,9 +79,7 @@ for device_string in backends[backends_avail] # Select backends to test based on
         forces_mace = @showprogress [-NQCModels.derivative(mace_model_ase, st.positions) for st in structures_to_test] # forces in a.u. from ASE calculator.
         @info "Checking equality to within 1e-5 Hartree / ~25 meV"
         compare_energies = isapprox.(energies_mace, energies_macemodels; atol=1e-5)
-        for energy in compare_energies
-            @test energy
-        end
+        @test all(compare_energies) # Predicted energies match to within 1e-5 Hartree
         for forces in zip(forces_mace, forces_macemodels)
             compare = isapprox.(forces...; atol=1e-5)
             for i in eachindex(compare)
