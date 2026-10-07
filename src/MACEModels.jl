@@ -298,7 +298,6 @@ function predict!(
     torch[].set_default_dtype(mace_interface.torch_dtype)
 
     if R != mace_interface.last_eval_cache.input_structures # Only predict if working on new structures
-        n_batches = length(R) / mace_interface.batch_size |> ceil |> Int # Number of batches to pass through MACE. ≥ 1
         structure_slices = Iterators.partition(1:length(R), mace_interface.batch_size) |> collect
 
         # atoms and cell must always be vectors for each structure.
@@ -307,7 +306,7 @@ function predict!(
 
         # Allocate results arrays for prediction
         mace_interface.last_eval_cache.input_structures = deepcopy(R)
-        mace_interface.last_eval_cache.energies = [mtx_to_device(zeros(T, length(R)), D()) for i in eachindex(mace_interface.models)]
+        mace_interface.last_eval_cache.energies = mtx_to_device(zeros(T, length(R), length(mace_interface.models)), D())
         full_ptr = vcat(1, [length(at.masses) for at in atoms])|> cumsum
         mace_interface.last_eval_cache.ptr = mtx_to_device(full_ptr, D())
         mace_interface.last_eval_cache.forces = mtx_to_device(zeros(T, mace_interface.ndofs, sum([length(at) for at in atoms]), length(mace_interface.models)), D())
@@ -315,6 +314,7 @@ function predict!(
         force_slice_end = full_ptr[min(mace_interface.batch_size, length(R))+1]-1
 
         # For each batch that needs running, build the corresponding graph(s).
+        n_batches = length(R) / mace_interface.batch_size |> ceil |> Int # Number of batches to pass through MACE. ≥ 1
         for batch_idx in 1:n_batches
             # Since all models must be on the same GPU, the dict can be reused across models.
             batch_parts = [to_julia_dict(
@@ -325,12 +325,15 @@ function predict!(
             ) for structure_idx in structure_slices[batch_idx]]
             # Shorthand to route Arrays to correct device and torch representation.
             torch_tensor_device(x) = DLPack.share(mtx_to_device(x, M()), torch[].from_dlpack)
+            # Pointer for the starting index of the next structure, defined in 1-indexing for Julia here.
+            ptr = vcat(1, [length(atoms[st_idx]) for st_idx in structure_slices[batch_idx]]) |> cumsum
             # Combine together into a single graph in Torch representation by concatenating along the highest dimension.
             # For loop expanded out to ensure since concatenation rules are inconsistent.
             the_batch = Dict{String, Py}()
             the_batch["head"] = cat([d["head"] for d in batch_parts]...;dims = 1) |> torch_tensor_device
             the_batch["cell"] = cat([d["cell"] for d in batch_parts]...;dims = 2) |> torch_tensor_device
-            the_batch["edge_index"] = cat([d["edge_index"] for d in batch_parts]...;dims = 1) |> torch_tensor_device
+            # edge_index for each structure starts at 0, for batching purposes it needs to be increased by the number of atoms before it
+            the_batch["edge_index"] = cat([batch_parts[d]["edge_index"] .+ (ptr[d] - 1) for d in eachindex(batch_parts)]...;dims = 1) |> torch_tensor_device
             the_batch["energy"] = cat([d["energy"] for d in batch_parts]...;dims = 1) |> torch_tensor_device
             the_batch["forces"] = cat([d["forces"] for d in batch_parts]...;dims = 2) |> torch_tensor_device
             the_batch["node_attrs"] = cat([d["node_attrs"] for d in batch_parts]...;dims = 2) |> torch_tensor_device
@@ -341,7 +344,7 @@ function predict!(
             # Set batch and ptr information
             batch_idx_vector = vcat([repeat([N-1], length(at.masses)) for (N,at) in enumerate(atoms[structure_slices[batch_idx]])]...)
             the_batch["batch"] = batch_idx_vector |> torch_tensor_device # length Natoms * batch size, must be a torch.int type.
-            ptr = vcat(1, [length(atoms[st_idx]) for st_idx in structure_slices[batch_idx]]) |> cumsum
+            # Python is 0-indexed, so save it like that here.
             the_batch["ptr"] = ptr .-1 |> torch_tensor_device # length batch size + 1, must be a torch.int type.
             # Now the batch should be set up correctly.
             # for k in keys(the_batch)
@@ -353,7 +356,7 @@ function predict!(
                 model_output = Py(model.forward(the_batch |> PyDict)) # Default kwargs specify training=false, compute_stress=false, compute_node_energy=false, these must be set to not mess things up.
                 # Shared memory refs to the model outputs.
                 # These need moving to the CPU for now due to scalar indexing. I need to think about how to solve this separately.
-                mace_interface.last_eval_cache.energies[model_index] = mtx_to_device(from_dlpack(model_output["energy"].contiguous().detach()), D())
+                mace_interface.last_eval_cache.energies[structure_slices[batch_idx], model_index] .= mtx_to_device(from_dlpack(model_output["energy"].contiguous().detach()), D())
                 mace_interface.last_eval_cache.forces[:,force_slice_start:force_slice_end,model_index] .= mtx_to_device(from_dlpack(model_output["forces"].contiguous().detach()), D())
             end
             force_slice_start = batch_idx < n_batches ? full_ptr[batch_idx*mace_interface.batch_size+1] : force_slice_start
