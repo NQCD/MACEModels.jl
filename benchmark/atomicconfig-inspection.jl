@@ -1,5 +1,5 @@
 ### A Pluto.jl notebook ###
-# v1.0.3
+# v1.0.4
 
 using Markdown
 using InteractiveUtils
@@ -9,12 +9,6 @@ import Pkg
 
 # ╔═╡ 94655f2b-bfce-4d6e-b9ca-c7edc9f1e83b
 Pkg.activate(".")
-
-# ╔═╡ 10a8c530-e531-43b3-af09-e9bfcad41c61
-# ╠═╡ disabled = true
-#=╠═╡
-Pkg.add("DLPack")
-  ╠═╡ =#
 
 # ╔═╡ 529161ff-6094-45ae-a918-f875c455353b
 using PythonCall
@@ -36,6 +30,12 @@ using LinearAlgebra
 
 # ╔═╡ 2605e644-9e81-4de0-a357-e90419fa0340
 using KernelAbstractions
+
+# ╔═╡ 10a8c530-e531-43b3-af09-e9bfcad41c61
+# ╠═╡ disabled = true
+#=╠═╡
+Pkg.add("DLPack")
+  ╠═╡ =#
 
 # ╔═╡ 27f13aa4-b824-40b9-9038-6133fae12df9
 begin
@@ -123,8 +123,20 @@ ab_structure.cell.periodicity
 # ╔═╡ 7f6e31fe-a24d-4e78-96dc-0b2c8aecb4b4
 cell_cu = reduce(hcat, ab_structure.cell.cell_vectors.|> ustrip) |> CuArray
 
+# ╔═╡ 5d0ecfa9-5e96-42d9-8ff6-d08915e39b79
+
+
 # ╔═╡ 61c839df-195f-4412-b438-5f476ffb2ba9
-ab_nl = neighbour_list(pos_cu, 5.0, hcat(ab_structure.cell.cell_vectors...) |> Matrix .|> ustrip, ab_structure.cell.periodicity; backend = CUDABackend())
+ab_nl = NeighbourLists.materialize_pairlist.(NeighbourLists.build_cell_list.([pos_cu for _ in 1:10], 5.0, [hcat(ab_structure.cell.cell_vectors...) |> Matrix .|> ustrip  for _ in 1:10], [ab_structure.cell.periodicity for _ in 1:10]; backend = CUDABackend()), backend = CUDABackend())
+
+# ╔═╡ 5a600f16-3f54-4bbb-a2e7-32d4563e388e
+@code_warntype NeighbourLists.materialize_pairlist(NeighbourLists.build_cell_list(pos_cu, 5.0, hcat(ab_structure.cell.cell_vectors...) |> Matrix .|> ustrip, ab_structure.cell.periodicity; backend = NeighbourLists.get_array_backend(pos_cu)), backend = NeighbourLists.get_array_backend(pos_cu))
+
+# ╔═╡ 442642d3-2811-4f1b-814b-73e83a14125a
+@code_warntype NeighbourLists.bool_to_val(true)
+
+# ╔═╡ 3af87bbf-6bb8-4743-acae-f55c4d219611
+ab_nl.S
 
 # ╔═╡ 9f5460ac-8a23-4711-ad98-8a2922194707
 sr = vcat((ab_nl.i .-1)', (ab_nl.j .-1)')
@@ -155,6 +167,12 @@ end
 
 # ╔═╡ 57fb93b5-b454-478c-8cb8-87c437fadcf6
 Smat = reinterpret(reshape, Int32, ab_nl.S)
+
+# ╔═╡ 2a1af60c-1de1-4eae-b5ff-415f3d9e65c2
+Smat_c = Array(Smat)
+
+# ╔═╡ 87ad5cef-c2c0-43fd-8558-03e76a935dbc
+cell_cu * Smat
 
 # ╔═╡ 93135cde-c8f5-45f1-b06b-1a56d020b05a
 shift_dot!(zero(Smat), Smat, cell_cu)
@@ -195,6 +213,12 @@ nqcd_structure.positions |> CuArray
 
 # ╔═╡ c54292bf-cb54-4cbe-972f-cebc1822ff67
 ta .= nqcd_structure.positions |> CuArray .|> Float32
+
+# ╔═╡ 2c3c2c51-e99b-4b22-afb6-f297ed4e4fc9
+nqcd_structure.cell.vectors * Smat_c
+
+# ╔═╡ 22d9e37c-92c9-4f52-8a87-98507b5e156d
+
 
 # ╔═╡ 3b35fe3c-17af-45e3-b262-adc291352543
 onehot = vcat(
@@ -382,7 +406,11 @@ st1_cpu .= st1
 # ╠═6e7f14ce-08c6-4ee1-b8d1-e8096fc28172
 # ╠═5f1af5ac-45a4-48ee-861c-577b4487c151
 # ╠═7f6e31fe-a24d-4e78-96dc-0b2c8aecb4b4
+# ╠═5d0ecfa9-5e96-42d9-8ff6-d08915e39b79
 # ╠═61c839df-195f-4412-b438-5f476ffb2ba9
+# ╠═5a600f16-3f54-4bbb-a2e7-32d4563e388e
+# ╠═442642d3-2811-4f1b-814b-73e83a14125a
+# ╠═3af87bbf-6bb8-4743-acae-f55c4d219611
 # ╠═9f5460ac-8a23-4711-ad98-8a2922194707
 # ╠═f0065583-9cd5-4d41-a20c-8de0f355dff9
 # ╠═742089b7-07b6-4904-88e9-89bd1b1af0d6
@@ -393,12 +421,16 @@ st1_cpu .= st1
 # ╠═2605e644-9e81-4de0-a357-e90419fa0340
 # ╠═e7c0df73-dc5d-4b1b-a8ea-91be91d1a572
 # ╠═57fb93b5-b454-478c-8cb8-87c437fadcf6
+# ╠═2a1af60c-1de1-4eae-b5ff-415f3d9e65c2
+# ╠═2c3c2c51-e99b-4b22-afb6-f297ed4e4fc9
+# ╠═87ad5cef-c2c0-43fd-8558-03e76a935dbc
 # ╠═93135cde-c8f5-45f1-b06b-1a56d020b05a
 # ╠═775f9a74-c64b-4ecf-8e2c-05d99ed5fc39
 # ╠═573f6781-5002-4c77-96c4-e9a6d7bff6e8
 # ╠═526969ee-e5fb-41bb-9d92-c8746e5d8beb
 # ╠═a3cbad78-7464-4445-b02d-eaf5647c34cb
 # ╠═fd86fcc3-842e-413a-aae7-4179bcdc0b8b
+# ╠═22d9e37c-92c9-4f52-8a87-98507b5e156d
 # ╠═3b35fe3c-17af-45e3-b262-adc291352543
 # ╠═358e737d-0a1d-4b75-b796-e40e356955d2
 # ╠═e293a428-e577-4048-98a8-8809dd439051
